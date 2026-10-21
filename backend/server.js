@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v2 =====
-// Changes: owner-only goods, Nigerian time, real server dates, data backup
+// ===== MY STORES MANAGER — BACKEND v3 =====
+// owner-only goods + Nigerian server time + REQUIRED worker name on every sale
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -190,9 +190,13 @@ app.delete("/api/stores/:id/products/:pid", ownerAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- SALES (workers can only record sales; date comes from THIS server) ----------
+// ---------- SALES (workers can only record sales; date + worker name enforced by server) ----------
 app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   const { productId, qty, amount, worker } = req.body;
+  // WORKER NAME IS MANDATORY — no anonymous sales
+  if (!worker || !String(worker).trim()) {
+    return res.status(400).json({ error: "Worker name is required. Enter your name when opening the store." });
+  }
   const p = req.store.products.find((x) => x.id === productId);
   if (!p) return res.status(404).json({ error: "Product not found" });
   if (!(qty > 0)) return res.status(400).json({ error: "Quantity required" });
@@ -205,7 +209,7 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
     id: uid(), productId: p.id, productName: p.name,
     qty: Number(qty), amount: amt, costPrice: p.costPrice,
     profit: amt - p.costPrice * qty,
-    worker: worker || "",
+    worker: String(worker).trim(),
     date: new Date().toISOString() // SERVER time — the staff's phone cannot change this
   };
   req.store.sales.push(sale); saveDB();
