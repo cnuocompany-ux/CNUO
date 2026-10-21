@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — FRONTEND v2 =====
-// Changes: staff name at login, today's totals, owner-only goods, data backup button
+// ===== MY STORES MANAGER — FRONTEND v3 =====
+// REQUIRED staff name at login + today's totals + owner-only goods + backup
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
@@ -138,20 +138,26 @@ async function openStore(id, name) {
     <div class="container"><div class="card">
       <h2>Enter store password</h2>
       <div id="slMsg"></div>
-      <label>Your name (who is selling today)</label>
+      <label>Your name (REQUIRED — who is selling today)</label>
       <input id="slName" placeholder="e.g. Ada" value="${esc(sellerName(id))}" />
       <label>Password</label><input id="slPass" type="password" />
       <button class="btn btn-primary btn-block" onclick="doStoreLogin('${id}')">Open store & start selling</button>
-      <p class="small">Type your name every day you sell — all your sales will carry your name and the real date.</p>
+      <p class="small">Your name is required. Every sale you make today will carry your name and the real date.</p>
     </div></div>`;
 }
 async function doStoreLogin(id) {
+  // NAME IS MANDATORY — refuse to open the store without it
+  const nm = ((document.getElementById("slName") || {}).value || "").trim();
+  if (!nm) {
+    document.getElementById("slMsg").innerHTML =
+      `<div class="msg msg-error">⚠️ Type your name first. It is required — every sale must show who made it.</div>`;
+    return;
+  }
   try {
     const r = await api(`/api/stores/${id}/login`, { method: "POST",
       body: JSON.stringify({ password: document.getElementById("slPass").value }) });
     storeToken = r.token; localStorage.setItem("storeToken", storeToken);
-    const nm = (document.getElementById("slName") || {}).value || "";
-    if (nm.trim()) localStorage.setItem("seller_" + id, nm.trim());
+    localStorage.setItem("seller_" + id, nm);
     renderStore(id);
   } catch (e) { document.getElementById("slMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
@@ -206,9 +212,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <input id="saleQty" type="number" min="1" value="1" oninput="prefillAmount()" />
         <label>Amount received (auto-fills with your set price — change it if sold higher)</label>
         <input id="saleAmount" type="number" min="0" />
-        <label>Worker name</label>
-        <input id="saleWorker" value="${esc(sellerName(id))}" placeholder="Who made this sale?" />
         <button class="btn btn-green btn-block" onclick="doSale('${id}')">💾 Save sale</button>
+        <p class="small">Seller: <b>${esc(sellerName(id) || "—")}</b> (name locked from login — every sale will show this name)</p>
       </div></div>
 
       <div class="section ${tab === "stock" ? "active" : ""}">
@@ -251,7 +256,7 @@ async function renderStore(id, tab = "sale", msg = "") {
       </div>
 
       <div class="section ${tab === "log" ? "active" : ""}"><div class="card">
-        <h2>Sales log (real dates from the server)</h2>
+        <h2>Sales log (real dates & names)</h2>
         ${d.sales.length === 0 ? "<p>No sales yet.</p>" : `
         <div style="overflow-x:auto"><table>
           <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th></tr>
@@ -302,7 +307,7 @@ async function doSale(id) {
       productId: document.getElementById("saleProduct").value,
       qty,
       amount: amount === "" ? undefined : Number(amount),
-      worker: document.getElementById("saleWorker").value || sellerName(id) }) });
+      worker: sellerName(id) }) }); // name locked from login — staff cannot change it
     renderStore(id, "sale", "Sale saved ✅");
   } catch (e) { document.getElementById("saleMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
