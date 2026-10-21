@@ -1,12 +1,13 @@
-// ===== MY STORES MANAGER — BACKEND v5 =====
-// DATA LIVES IN GITHUB — survives redeploys, crashes, and code updates. Records NEVER clear.
+// ===== MY STORES MANAGER — BACKEND v6 =====
+// PERMANENT database = MongoDB (records survive redeploys & crashes — NEVER clear)
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { MongoClient } = require("mongodb");
 
-process.env.TZ = "Africa/Lagos"; // ALL dates in Nigerian time — set by the server, nobody can fake it
+process.env.TZ = "Africa/Lagos"; // ALL dates in Nigerian time — server-controlled, nobody can fake it
 
 const app = express();
 app.use(cors());
@@ -15,59 +16,71 @@ app.use(express.json({ limit: "20mb" })); // needed for product photos
 const DATA_FILE = path.join(__dirname, "data.json");
 const PORT = process.env.PORT || 3000;
 
-// ---------- GitHub = your permanent database (set these 4 variables in Render) ----------
+// ---------- MongoDB = your permanent database (set MONGO_URL in Render) ----------
+const MONGO_URL = process.env.MONGO_URL || "";
+let mongoCol = null;
+
+// ---------- optional GitHub backup (leave empty if not used) ----------
 const GH_TOKEN = process.env.GH_TOKEN || "";
-const GH_REPO = process.env.GH_REPO || "";     // e.g. cnuocompany-ux/CNUO
+const GH_REPO = process.env.GH_REPO || "";
 const GH_BRANCH = process.env.GH_BRANCH || "main";
 const GH_PATH = process.env.GH_PATH || "backend/data.json";
 const ghHeaders = { Authorization: `Bearer ${GH_TOKEN}`, "User-Agent": "my-stores", "Content-Type": "application/json" };
 const ghUrl = (q) => `https://api.github.com/repos/${GH_REPO}/contents/${GH_PATH}${q || ""}`;
 
-// ---------- password hashing (built into Node, no extra install) ----------
+// ---------- password hashing ----------
 const hash = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const uid = () => crypto.randomBytes(8).toString("hex");
 
-// ---------- load data: GitHub first (permanent), local file only as backup ----------
+// ---------- LOAD: MongoDB first, local file only as emergency backup ----------
 async function loadDB() {
-  if (GH_TOKEN && GH_REPO) {
+  if (MONGO_URL) {
     try {
-      const r = await fetch(ghUrl(`?ref=${GH_BRANCH}`), { headers: ghHeaders });
-      if (r.ok) {
-        const j = await r.json();
-        console.log("✅ Data loaded from GitHub (permanent storage)");
-        return JSON.parse(Buffer.from(j.content, "base64").toString("utf8"));
+      const client = new MongoClient(MONGO_URL);
+      await client.connect();
+      mongoCol = client.db("mystores").collection("app");
+      const doc = await mongoCol.findOne({ _id: "main" });
+      if (doc && doc.data) {
+        console.log("✅ Data loaded from MongoDB (permanent)");
+        return doc.data;
       }
-      if (r.status === 404) console.log("No data file on GitHub yet — will be created on first save.");
-      else console.error("GitHub load failed:", r.status);
-    } catch (e) { console.error("GitHub load error:", e.message); }
+      console.log("MongoDB is empty — starting fresh (this happens only ONCE)");
+      return { ownerPassword: hash("owner123"), lowStockDefault: 5, stores: [] };
+    } catch (e) { console.error("MongoDB connection error:", e.message); }
   }
   if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   return { ownerPassword: hash("owner123"), lowStockDefault: 5, stores: [] };
 }
 
-// ---------- save data: local file AND GitHub (queued so saves never collide) ----------
+// ---------- SAVE: memory is instant for the user; MongoDB + GitHub saved shortly after ----------
+let saveTimer = null;
 let ghQueue = Promise.resolve();
-function ghSave() {
-  if (!GH_TOKEN || !GH_REPO) return;
-  ghQueue = ghQueue.then(async () => {
-    try {
-      let sha;
-      const cur = await fetch(ghUrl(`?ref=${GH_BRANCH}`), { headers: ghHeaders });
-      if (cur.ok) sha = (await cur.json()).sha;
-      const body = {
-        message: "business data " + new Date().toISOString(),
-        content: Buffer.from(JSON.stringify(db, null, 2)).toString("base64"),
-        branch: GH_BRANCH
-      };
-      if (sha) body.sha = sha;
-      const r = await fetch(ghUrl(""), { method: "PUT", headers: ghHeaders, body: JSON.stringify(body) });
-      if (!r.ok) console.error("GitHub save failed:", await r.text());
-    } catch (e) { console.error("GitHub save error:", e.message); }
-  });
-}
 const saveDB = () => {
   try { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch (e) {}
-  ghSave(); // permanent copy to GitHub
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (mongoCol) {
+      mongoCol.updateOne({ _id: "main" }, { $set: { data: db } }, { upsert: true })
+        .then(() => console.log("Saved to MongoDB ✅"))
+        .catch((e) => console.error("MongoDB save error:", e.message));
+    }
+    if (GH_TOKEN && GH_REPO) {
+      ghQueue = ghQueue.then(async () => {
+        try {
+          let sha;
+          const cur = await fetch(ghUrl(`?ref=${GH_BRANCH}`), { headers: ghHeaders });
+          if (cur.ok) sha = (await cur.json()).sha;
+          const body = {
+            message: "business data " + new Date().toISOString(),
+            content: Buffer.from(JSON.stringify(db, null, 2)).toString("base64"),
+            branch: GH_BRANCH
+          };
+          if (sha) body.sha = sha;
+          await fetch(ghUrl(""), { method: "PUT", headers: ghHeaders, body: JSON.stringify(body) });
+        } catch (e) { console.error("GitHub backup error:", e.message); }
+      });
+    }
+  }, 800);
 };
 
 // ---------- login tokens (memory only — logins reset on restart, DATA never does) ----------
@@ -85,7 +98,6 @@ function storeAuth(req, res, next) {
   if (store) { req.store = store; return next(); }
   res.status(401).json({ error: "Wrong password for this store" });
 }
-// OWNER ONLY: for adding/adjusting goods, photos, prices, stock
 function ownerOnly(req, res, next) {
   const s = getStore(req.params.id);
   if (!s) return res.status(404).json({ error: "Store not found" });
@@ -94,7 +106,6 @@ function ownerOnly(req, res, next) {
 }
 const getStore = (id) => db.stores.find((s) => s.id === id);
 
-// calculated fields for a store's products
 function withCalc(store) {
   return store.products.map((p) => {
     const sold = store.sales.filter((s) => s.productId === p.id)
@@ -104,8 +115,8 @@ function withCalc(store) {
       : remaining <= (store.lowStock ?? db.lowStockDefault) ? "LOW STOCK" : "OK";
     return {
       ...p,
-      createdAt: p.createdAt || p.addedAt || null, // original creation date — NEVER changes
-      purchases: p.purchases || [],                // full purchase history with dates + suppliers
+      createdAt: p.createdAt || p.addedAt || null,
+      purchases: p.purchases || [],
       sold, remaining, status
     };
   });
@@ -126,7 +137,6 @@ app.post("/api/owner/password", ownerAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- FULL DATA BACKUP (owner only) ----------
 app.get("/api/export", ownerAuth, (req, res) => res.json(db));
 
 // ---------- STORES ----------
@@ -210,7 +220,7 @@ app.post("/api/stores/:id/products", ownerOnly, (req, res) => {
     qtyArrived: Number(qtyArrived),
     costPrice: Number(costPrice) || 0,
     sellPrice: Number(sellPrice) || 0,
-    createdAt: now, // original date — editing later NEVER changes this
+    createdAt: now,
     purchases: [{
       id: uid(), qty: Number(qtyArrived),
       costPrice: Number(costPrice) || 0,
@@ -222,7 +232,6 @@ app.post("/api/stores/:id/products", ownerOnly, (req, res) => {
   res.json({ id: p.id });
 });
 
-// EDIT product — fix forgotten details. createdAt and purchase history stay untouched.
 app.put("/api/stores/:id/products/:pid", ownerOnly, (req, res) => {
   const p = req.store.products.find((x) => x.id === req.params.pid);
   if (!p) return res.status(404).json({ error: "Product not found" });
@@ -235,7 +244,6 @@ app.put("/api/stores/:id/products/:pid", ownerOnly, (req, res) => {
   res.json({ ok: true });
 });
 
-// RESTOCK — adds to total AND records this batch with its own date + supplier
 app.post("/api/stores/:id/products/:pid/restock", ownerOnly, (req, res) => {
   const p = req.store.products.find((x) => x.id === req.params.pid);
   if (!p) return res.status(404).json({ error: "Product not found" });
@@ -249,7 +257,7 @@ app.post("/api/stores/:id/products/:pid/restock", ownerOnly, (req, res) => {
     id: uid(), qty,
     costPrice: req.body.costPrice ? Number(req.body.costPrice) : p.costPrice,
     supplier: (req.body.supplier || "").trim(),
-    date: new Date().toISOString() // THIS batch's date — different from earlier batches
+    date: new Date().toISOString()
   });
   saveDB();
   res.json({ ok: true });
@@ -263,7 +271,7 @@ app.delete("/api/stores/:id/products/:pid", ownerAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- SALES (workers can only record sales; date + worker name enforced by server) ----------
+// ---------- SALES ----------
 app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   const { productId, qty, amount, worker } = req.body;
   if (!worker || !String(worker).trim()) {
@@ -281,15 +289,15 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
     qty: Number(qty), amount: amt, costPrice: p.costPrice,
     profit: amt - p.costPrice * qty,
     worker: String(worker).trim(),
-    date: new Date().toISOString() // SERVER time — the staff's phone cannot change this
+    date: new Date().toISOString() // SERVER time — cannot be faked
   };
   req.store.sales.push(sale); saveDB();
   res.json({ id: sale.id });
 });
 
-app.get("/", (req, res) => res.send("My Stores API is running ✅ — data stored permanently in GitHub"));
+app.get("/", (req, res) => res.send("My Stores API is running ✅ — data permanently stored in MongoDB"));
 
-// ---------- START: load permanent data FIRST, then open the server ----------
+// ---------- START: connect to permanent database FIRST, then serve ----------
 let db;
 loadDB().then((loaded) => {
   db = loaded;
