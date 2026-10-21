@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v4 =====
-// purchase history + supplier + product editing (date preserved) + required worker name
+// ===== MY STORES MANAGER — BACKEND v5 =====
+// DATA LIVES IN GITHUB — survives redeploys, crashes, and code updates. Records NEVER clear.
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -15,20 +15,62 @@ app.use(express.json({ limit: "20mb" })); // needed for product photos
 const DATA_FILE = path.join(__dirname, "data.json");
 const PORT = process.env.PORT || 3000;
 
+// ---------- GitHub = your permanent database (set these 4 variables in Render) ----------
+const GH_TOKEN = process.env.GH_TOKEN || "";
+const GH_REPO = process.env.GH_REPO || "";     // e.g. cnuocompany-ux/CNUO
+const GH_BRANCH = process.env.GH_BRANCH || "main";
+const GH_PATH = process.env.GH_PATH || "backend/data.json";
+const ghHeaders = { Authorization: `Bearer ${GH_TOKEN}`, "User-Agent": "my-stores", "Content-Type": "application/json" };
+const ghUrl = (q) => `https://api.github.com/repos/${GH_REPO}/contents/${GH_PATH}${q || ""}`;
+
 // ---------- password hashing (built into Node, no extra install) ----------
 const hash = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const uid = () => crypto.randomBytes(8).toString("hex");
 
-// ---------- data file ----------
-function loadDB() {
+// ---------- load data: GitHub first (permanent), local file only as backup ----------
+async function loadDB() {
+  if (GH_TOKEN && GH_REPO) {
+    try {
+      const r = await fetch(ghUrl(`?ref=${GH_BRANCH}`), { headers: ghHeaders });
+      if (r.ok) {
+        const j = await r.json();
+        console.log("✅ Data loaded from GitHub (permanent storage)");
+        return JSON.parse(Buffer.from(j.content, "base64").toString("utf8"));
+      }
+      if (r.status === 404) console.log("No data file on GitHub yet — will be created on first save.");
+      else console.error("GitHub load failed:", r.status);
+    } catch (e) { console.error("GitHub load error:", e.message); }
+  }
   if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-  // First run: default owner password is owner123 — CHANGE IT after first login!
   return { ownerPassword: hash("owner123"), lowStockDefault: 5, stores: [] };
 }
-let db = loadDB();
-const saveDB = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 
-// ---------- login tokens (memory only — workers re-login if server restarts) ----------
+// ---------- save data: local file AND GitHub (queued so saves never collide) ----------
+let ghQueue = Promise.resolve();
+function ghSave() {
+  if (!GH_TOKEN || !GH_REPO) return;
+  ghQueue = ghQueue.then(async () => {
+    try {
+      let sha;
+      const cur = await fetch(ghUrl(`?ref=${GH_BRANCH}`), { headers: ghHeaders });
+      if (cur.ok) sha = (await cur.json()).sha;
+      const body = {
+        message: "business data " + new Date().toISOString(),
+        content: Buffer.from(JSON.stringify(db, null, 2)).toString("base64"),
+        branch: GH_BRANCH
+      };
+      if (sha) body.sha = sha;
+      const r = await fetch(ghUrl(""), { method: "PUT", headers: ghHeaders, body: JSON.stringify(body) });
+      if (!r.ok) console.error("GitHub save failed:", await r.text());
+    } catch (e) { console.error("GitHub save error:", e.message); }
+  });
+}
+const saveDB = () => {
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch (e) {}
+  ghSave(); // permanent copy to GitHub
+};
+
+// ---------- login tokens (memory only — logins reset on restart, DATA never does) ----------
 const ownerTokens = new Set();
 const storeTokens = {}; // token -> storeId
 
@@ -88,14 +130,12 @@ app.post("/api/owner/password", ownerAuth, (req, res) => {
 app.get("/api/export", ownerAuth, (req, res) => res.json(db));
 
 // ---------- STORES ----------
-// public: only names/design — no money data (for the main page)
 app.get("/api/stores", (req, res) => {
   res.json(db.stores.map((s) => ({
     id: s.id, name: s.name, registeredName: s.registeredName, color: s.color
   })));
 });
 
-// full data — owner token OR that store's token
 app.get("/api/stores/:id", (req, res) => {
   const s = getStore(req.params.id);
   if (!s) return res.status(404).json({ error: "Store not found" });
@@ -128,7 +168,6 @@ app.post("/api/stores", ownerAuth, (req, res) => {
   res.json({ id: s.id });
 });
 
-// worker login for one store
 app.post("/api/stores/:id/login", (req, res) => {
   const s = getStore(req.params.id);
   if (!s) return res.status(404).json({ error: "Store not found" });
@@ -139,7 +178,6 @@ app.post("/api/stores/:id/login", (req, res) => {
   res.status(401).json({ error: "Wrong password for this store" });
 });
 
-// update store: rename, change color, low-stock level, or CHANGE PASSWORD (kick old worker out)
 app.put("/api/stores/:id", ownerAuth, (req, res) => {
   const s = getStore(req.params.id);
   if (!s) return res.status(404).json({ error: "Store not found" });
@@ -163,7 +201,6 @@ app.delete("/api/stores/:id", ownerAuth, (req, res) => {
 });
 
 // ---------- PRODUCTS (OWNER ONLY) ----------
-// Add new goods — records the purchase: date, quantity, cost, and SUPPLIER (who you bought from)
 app.post("/api/stores/:id/products", ownerOnly, (req, res) => {
   const { name, qtyArrived, costPrice, sellPrice, photo, supplier } = req.body;
   if (!name || !(qtyArrived > 0)) return res.status(400).json({ error: "Name and quantity required" });
@@ -204,7 +241,7 @@ app.post("/api/stores/:id/products/:pid/restock", ownerOnly, (req, res) => {
   if (!p) return res.status(404).json({ error: "Product not found" });
   const qty = Number(req.body.qty);
   if (!(qty > 0)) return res.status(400).json({ error: "Quantity required" });
-  p.qtyArrived += qty; // total quantity keeps growing — history shows each batch
+  p.qtyArrived += qty;
   if (req.body.costPrice) p.costPrice = Number(req.body.costPrice);
   if (req.body.sellPrice) p.sellPrice = Number(req.body.sellPrice);
   p.purchases = p.purchases || [];
@@ -229,7 +266,6 @@ app.delete("/api/stores/:id/products/:pid", ownerAuth, (req, res) => {
 // ---------- SALES (workers can only record sales; date + worker name enforced by server) ----------
 app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   const { productId, qty, amount, worker } = req.body;
-  // WORKER NAME IS MANDATORY — no anonymous sales
   if (!worker || !String(worker).trim()) {
     return res.status(400).json({ error: "Worker name is required. Enter your name when opening the store." });
   }
@@ -239,7 +275,6 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   const remaining = p.qtyArrived - req.store.sales
     .filter((s) => s.productId === p.id).reduce((a, s) => a + s.qty, 0);
   if (qty > remaining) return res.status(400).json({ error: `Only ${remaining} left in stock` });
-  // amount = real money collected (worker can type more than set price). Default = set price × qty
   const amt = amount !== undefined && amount !== "" ? Number(amount) : p.sellPrice * qty;
   const sale = {
     id: uid(), productId: p.id, productName: p.name,
@@ -252,5 +287,11 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   res.json({ id: sale.id });
 });
 
-app.get("/", (req, res) => res.send("My Stores API is running ✅"));
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.get("/", (req, res) => res.send("My Stores API is running ✅ — data stored permanently in GitHub"));
+
+// ---------- START: load permanent data FIRST, then open the server ----------
+let db;
+loadDB().then((loaded) => {
+  db = loaded;
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+});
