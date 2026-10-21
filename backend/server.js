@@ -1,9 +1,12 @@
-// ===== MY STORES MANAGER — BACKEND (deploy on Render) =====
+// ===== MY STORES MANAGER — BACKEND v2 =====
+// Changes: owner-only goods, Nigerian time, real server dates, data backup
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+
+process.env.TZ = "Africa/Lagos"; // ALL dates in Nigerian time — set by the server, nobody can fake it
 
 const app = express();
 app.use(cors());
@@ -40,6 +43,13 @@ function storeAuth(req, res, next) {
   if (store) { req.store = store; return next(); }
   res.status(401).json({ error: "Wrong password for this store" });
 }
+// OWNER ONLY: for adding/adjusting goods, photos, prices, stock
+function ownerOnly(req, res, next) {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  if (ownerTokens.has(req.headers["x-owner-token"])) { req.store = s; return next(); }
+  res.status(403).json({ error: "Only the owner can add or adjust goods" });
+}
 const getStore = (id) => db.stores.find((s) => s.id === id);
 
 // calculated fields for a store's products
@@ -68,6 +78,9 @@ app.post("/api/owner/password", ownerAuth, (req, res) => {
   db.ownerPassword = hash(req.body.newPassword); saveDB();
   res.json({ ok: true });
 });
+
+// ---------- FULL DATA BACKUP (owner only) ----------
+app.get("/api/export", ownerAuth, (req, res) => res.json(db));
 
 // ---------- STORES ----------
 // public: only names/design — no money data (for the main page)
@@ -144,8 +157,8 @@ app.delete("/api/stores/:id", ownerAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- PRODUCTS (new goods arriving) ----------
-app.post("/api/stores/:id/products", storeAuth, (req, res) => {
+// ---------- PRODUCTS (OWNER ONLY — new goods arriving) ----------
+app.post("/api/stores/:id/products", ownerOnly, (req, res) => {
   const { name, qtyArrived, costPrice, sellPrice, photo } = req.body;
   if (!name || !(qtyArrived > 0)) return res.status(400).json({ error: "Name and quantity required" });
   const p = {
@@ -157,8 +170,8 @@ app.post("/api/stores/:id/products", storeAuth, (req, res) => {
   res.json({ id: p.id });
 });
 
-// more stock arrived for an existing product
-app.post("/api/stores/:id/products/:pid/restock", storeAuth, (req, res) => {
+// more stock arrived for an existing product (OWNER ONLY)
+app.post("/api/stores/:id/products/:pid/restock", ownerOnly, (req, res) => {
   const p = req.store.products.find((x) => x.id === req.params.pid);
   if (!p) return res.status(404).json({ error: "Product not found" });
   if (!(req.body.qty > 0)) return res.status(400).json({ error: "Quantity required" });
@@ -177,7 +190,7 @@ app.delete("/api/stores/:id/products/:pid", ownerAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- SALES ----------
+// ---------- SALES (workers can only record sales; date comes from THIS server) ----------
 app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   const { productId, qty, amount, worker } = req.body;
   const p = req.store.products.find((x) => x.id === productId);
@@ -192,7 +205,8 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
     id: uid(), productId: p.id, productName: p.name,
     qty: Number(qty), amount: amt, costPrice: p.costPrice,
     profit: amt - p.costPrice * qty,
-    worker: worker || "", date: new Date().toISOString()
+    worker: worker || "",
+    date: new Date().toISOString() // SERVER time — the staff's phone cannot change this
   };
   req.store.sales.push(sale); saveDB();
   res.json({ id: sale.id });
@@ -200,4 +214,3 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
 
 app.get("/", (req, res) => res.send("My Stores API is running ✅"));
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
