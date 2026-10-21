@@ -1,4 +1,5 @@
-// ===== MY STORES MANAGER — FRONTEND (deploy on Netlify) =====
+// ===== MY STORES MANAGER — FRONTEND v2 =====
+// Changes: staff name at login, today's totals, owner-only goods, data backup button
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
@@ -11,6 +12,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (iso) => { const d = new Date(iso);
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+const sellerName = (id) => localStorage.getItem("seller_" + id) || "";
 
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -136,8 +138,11 @@ async function openStore(id, name) {
     <div class="container"><div class="card">
       <h2>Enter store password</h2>
       <div id="slMsg"></div>
+      <label>Your name (who is selling today)</label>
+      <input id="slName" placeholder="e.g. Ada" value="${esc(sellerName(id))}" />
       <label>Password</label><input id="slPass" type="password" />
-      <button class="btn btn-primary btn-block" onclick="doStoreLogin('${id}')">Open store</button>
+      <button class="btn btn-primary btn-block" onclick="doStoreLogin('${id}')">Open store & start selling</button>
+      <p class="small">Type your name every day you sell — all your sales will carry your name and the real date.</p>
     </div></div>`;
 }
 async function doStoreLogin(id) {
@@ -145,6 +150,8 @@ async function doStoreLogin(id) {
     const r = await api(`/api/stores/${id}/login`, { method: "POST",
       body: JSON.stringify({ password: document.getElementById("slPass").value }) });
     storeToken = r.token; localStorage.setItem("storeToken", storeToken);
+    const nm = (document.getElementById("slName") || {}).value || "";
+    if (nm.trim()) localStorage.setItem("seller_" + id, nm.trim());
     renderStore(id);
   } catch (e) { document.getElementById("slMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
@@ -159,21 +166,28 @@ async function renderStore(id, tab = "sale", msg = "") {
     : s === "LOW STOCK" ? `<span class="badge badge-low">LOW STOCK</span>`
     : `<span class="badge badge-ok">OK</span>`;
 
+  // today's totals — calculated from the server's real dates
+  const today = new Date().toDateString();
+  const tSales = d.sales.filter((s) => new Date(s.date).toDateString() === today);
+  const tMoney = tSales.reduce((a, s) => a + s.amount, 0);
+  const tProfit = tSales.reduce((a, s) => a + s.profit, 0);
+
   app.innerHTML = `<div class="topbar" style="background:${esc(d.color)}">
       <h1>🏪 ${esc(d.name)}</h1>
       <button class="btn btn-gray" onclick="clearStoreLogin(); renderHome()">← All stores</button></div>
     <div class="container">
       ${msg ? `<div class="msg msg-ok">${esc(msg)}</div>` : ""}
+      ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
       <div class="stat-row">
-        <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">Money from sales</div></div>
-        <div class="stat"><div class="num">${money(d.totals.profit)}</div><div class="lbl">Profit</div></div>
-        <div class="stat"><div class="num">${d.products.length}</div><div class="lbl">Products</div></div>
-        <div class="stat"><div class="num">${d.totals.count}</div><div class="lbl">Sales recorded</div></div>
+        <div class="stat"><div class="num">${money(tMoney)}</div><div class="lbl">Today's money</div></div>
+        <div class="stat"><div class="num">${money(tProfit)}</div><div class="lbl">Today's profit</div></div>
+        <div class="stat"><div class="num">${tSales.length}</div><div class="lbl">Today's sales</div></div>
+        <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">All-time money</div></div>
       </div>
       <div class="tabs">
         <div class="tab ${tab === "sale" ? "active" : ""}" onclick="renderStore('${id}','sale')">➕ Record sale</div>
-        <div class="tab ${tab === "stock" ? "active" : ""}" onclick="renderStore('${id}','stock')">📦 Stock / add goods</div>
+        <div class="tab ${tab === "stock" ? "active" : ""}" onclick="renderStore('${id}','stock')">📦 Stock</div>
         <div class="tab ${tab === "log" ? "active" : ""}" onclick="renderStore('${id}','log')">📋 Sales log</div>
         ${d.isOwner ? `<div class="tab ${tab === "settings" ? "active" : ""}" onclick="renderStore('${id}','settings')">⚙️ Settings</div>` : ""}
       </div>
@@ -190,14 +204,15 @@ async function renderStore(id, tab = "sale", msg = "") {
         </select>
         <label>Quantity sold</label>
         <input id="saleQty" type="number" min="1" value="1" oninput="prefillAmount()" />
-        <label>Amount received (money collected — you can change it if sold above the set price)</label>
+        <label>Amount received (auto-fills with your set price — change it if sold higher)</label>
         <input id="saleAmount" type="number" min="0" />
-        <label>Worker name (optional)</label>
-        <input id="saleWorker" placeholder="Who made this sale?" />
+        <label>Worker name</label>
+        <input id="saleWorker" value="${esc(sellerName(id))}" placeholder="Who made this sale?" />
         <button class="btn btn-green btn-block" onclick="doSale('${id}')">💾 Save sale</button>
       </div></div>
 
-      <div class="section ${tab === "stock" ? "active" : ""}"><div class="card">
+      <div class="section ${tab === "stock" ? "active" : ""}">
+      ${d.isOwner ? `<div class="card">
         <h2>Stock</h2>
         ${d.products.length === 0 ? "<p>No products yet. Add your first goods below.</p>" : `
         <div style="overflow-x:auto"><table>
@@ -208,11 +223,11 @@ async function renderStore(id, tab = "sale", msg = "") {
             <td>${p.qtyArrived}</td><td>${p.sold}</td><td><b>${p.remaining}</b></td>
             <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
             <td><button class="btn btn-gray" onclick="doRestock('${id}','${p.id}')">+ Stock</button>
-                ${d.isOwner ? `<button class="btn btn-red" onclick="doDeleteProduct('${id}','${p.id}')">✕</button>` : ""}</td>
+                <button class="btn btn-red" onclick="doDeleteProduct('${id}','${p.id}')">✕</button></td>
           </tr>`).join("")}
         </table></div>`}
         <hr style="margin:16px 0">
-        <h2>Add new goods</h2>
+        <h2>Add new goods (owner only)</h2>
         <div id="prodMsg"></div>
         <label>Product name</label><input id="pName" placeholder="e.g. Total 5W-30 engine oil" />
         <label>Photo (optional)</label><input id="pPhoto" type="file" accept="image/*" />
@@ -220,10 +235,23 @@ async function renderStore(id, tab = "sale", msg = "") {
         <label>Cost price — what YOU paid for one</label><input id="pCost" type="number" min="0" />
         <label>Sell price — what the customer pays</label><input id="pSell" type="number" min="0" />
         <button class="btn btn-primary btn-block" onclick="doAddProduct('${id}')">📦 Save product</button>
-      </div></div>
+      </div>` : `<div class="card"><h2>Stock</h2>
+        <p>👀 View only — only the owner can add goods.</p>
+        ${d.products.length === 0 ? "<p>No products yet.</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th></th><th>Product</th><th>Arrived</th><th>Sold</th><th>Left</th><th>Status</th><th>Sell price</th></tr>
+          ${d.products.map((p) => `<tr>
+            <td>${p.photo ? `<img class="thumb" src="${p.photo}">` : ""}</td>
+            <td><b>${esc(p.name)}</b></td>
+            <td>${p.qtyArrived}</td><td>${p.sold}</td><td><b>${p.remaining}</b></td>
+            <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
+          </tr>`).join("")}
+        </table></div>`}
+      </div>`}
+      </div>
 
       <div class="section ${tab === "log" ? "active" : ""}"><div class="card">
-        <h2>Sales log</h2>
+        <h2>Sales log (real dates from the server)</h2>
         ${d.sales.length === 0 ? "<p>No sales yet.</p>" : `
         <div style="overflow-x:auto"><table>
           <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th></tr>
@@ -250,6 +278,9 @@ async function renderStore(id, tab = "sale", msg = "") {
         <input id="setOwnerPass" type="text" placeholder="new owner password" />
         <button class="btn btn-gray btn-block" onclick="doChangeOwnerPass()">Change owner password</button>
         <hr style="margin:16px 0">
+        <button class="btn btn-green btn-block" onclick="doBackup()">💾 DOWNLOAD ALL MY DATA (backup)</button>
+        <p class="small">Saves everything — all stores, products, sales — as a file on your phone. Do this weekly!</p>
+        <hr style="margin:16px 0">
         <button class="btn btn-red btn-block" onclick="doDeleteStore('${id}')">🗑️ DELETE this store</button>
       </div></div>` : ""}
     </div>`;
@@ -271,7 +302,7 @@ async function doSale(id) {
       productId: document.getElementById("saleProduct").value,
       qty,
       amount: amount === "" ? undefined : Number(amount),
-      worker: document.getElementById("saleWorker").value }) });
+      worker: document.getElementById("saleWorker").value || sellerName(id) }) });
     renderStore(id, "sale", "Sale saved ✅");
   } catch (e) { document.getElementById("saleMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
@@ -327,6 +358,19 @@ async function doDeleteStore(id) {
   if (!confirm("Delete this store and ALL its data forever?")) return;
   try { await api(`/api/stores/${id}`, { method: "DELETE" });
     clearStoreLogin(); renderHome("Store deleted"); } catch (e) { alert(e.message); }
+}
+
+// ---------- DOWNLOAD FULL BACKUP (owner only) ----------
+async function doBackup() {
+  try {
+    const data = await api("/api/export");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "my-stores-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    alert("Backup downloaded ✅ Keep this file safe — it contains ALL your business data.");
+  } catch (e) { alert(e.message); }
 }
 
 // ================= START =================
