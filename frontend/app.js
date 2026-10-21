@@ -1,11 +1,11 @@
-// ===== MY STORES MANAGER — FRONTEND v4 =====
-// purchase history + supplier + product edit + REQUIRED staff name + today's totals + backup
+// ===== MY STORES MANAGER — FRONTEND v7 =====
+// Money dashboard: sold / spent / TRUE profit / stock value + all previous features
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
 let storeId = localStorage.getItem("storeId") || "";
 let selectedColor = "#1F4E79";
-let editingProduct = null; // product being edited right now
+let editingProduct = null;
 
 const app = document.getElementById("app");
 const money = (n) => Number(n || 0).toLocaleString();
@@ -17,7 +17,6 @@ const dayDate = (iso) => new Date(iso).toLocaleDateString();
 const sellerName = (id) => localStorage.getItem("seller_" + id) || "";
 const val = (x) => ((document.getElementById(x) || {}).value ?? "");
 
-// purchase history as one clear line: "Oct 20: 500 @ 3,000 from Chidi · Oct 23: 200 @ 3,100 from Balogun"
 const purchaseLine = (p) => (p.purchases || [])
   .map((b) => `${dayDate(b.date)}: ${b.qty} @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}`)
   .join(" · ");
@@ -32,7 +31,7 @@ async function api(path, opts = {}) {
   return data;
 }
 
-// ================= SETUP SCREEN (first visit) =================
+// ================= SETUP SCREEN =================
 function renderSetup(msg = "") {
   app.innerHTML = `<div class="container">
     <div class="topbar"><h1>🏪 My Stores Manager</h1></div>
@@ -55,7 +54,7 @@ async function saveSetup() {
   catch (e) { renderSetup("Cannot reach that address. Check it and try again."); }
 }
 
-// ================= HOME: all stores =================
+// ================= HOME =================
 async function renderHome(msg = "") {
   let stores = [];
   try { stores = await api("/api/stores"); } catch (e) {}
@@ -84,7 +83,6 @@ async function renderHome(msg = "") {
     </div>`;
 }
 
-// ---- owner login ----
 function showOwnerLogin() {
   document.getElementById("homeMain").style.display = "none";
   document.getElementById("homeForm").innerHTML = `<div class="card">
@@ -106,7 +104,6 @@ async function doOwnerLogin() {
 }
 function logoutOwner() { ownerToken = ""; localStorage.removeItem("ownerToken"); renderHome(); }
 
-// ---- add store ----
 const COLORS = ["#1F4E79", "#c62828", "#2e7d32", "#6a1b9a", "#e65100", "#00695c"];
 function showAddStore() {
   if (!ownerToken) return showOwnerLogin();
@@ -152,7 +149,6 @@ async function openStore(id, name) {
     </div></div>`;
 }
 async function doStoreLogin(id) {
-  // NAME IS MANDATORY — refuse to open the store without it
   const nm = val("slName").trim();
   if (!nm) {
     document.getElementById("slMsg").innerHTML =
@@ -174,20 +170,22 @@ async function renderStore(id, tab = "sale", msg = "") {
   let d;
   try { d = await api(`/api/stores/${id}`); }
   catch (e) { clearStoreLogin(); return openStore(id, "this store"); }
-  // stop editing if the product no longer exists
   if (editingProduct && !d.products.find((p) => p.id === editingProduct)) editingProduct = null;
 
   const badge = (s) => s === "FINISHED" ? `<span class="badge badge-fin">FINISHED</span>`
     : s === "LOW STOCK" ? `<span class="badge badge-low">LOW STOCK</span>`
     : `<span class="badge badge-ok">OK</span>`;
 
-  // today's totals — calculated from the server's real dates
+  // today's numbers
   const today = new Date().toDateString();
   const tSales = d.sales.filter((s) => new Date(s.date).toDateString() === today);
   const tMoney = tSales.reduce((a, s) => a + s.amount, 0);
-  const tProfit = tSales.reduce((a, s) => a + s.profit, 0);
+  // per-sale profit (sold amount minus that product's cost)
+  const tProfit = tSales.reduce((a, s) => a + (s.amount - s.qty * (s.costPrice || 0)), 0);
 
-  // one table row per product, including added-date + purchase history (clear, not confusing)
+  // ====== TRUE PROFIT = everything customers paid − everything spent buying goods ======
+  const trueProfit = (d.totals.totalIn || 0) - (d.totals.spent || 0);
+
   const productRow = (p, ownerView) => `<tr>
     <td>${p.photo ? `<img class="thumb" src="${p.photo}">` : ""}</td>
     <td><b>${esc(p.name)}</b><br>
@@ -199,10 +197,9 @@ async function renderStore(id, tab = "sale", msg = "") {
         <button class="btn btn-red" onclick="doDeleteProduct('${id}','${p.id}')">✕</button></td>` : ""}
   </tr>`;
 
-  // edit form: fix details AND/OR add new stock with supplier — original date never changes
   const editForm = (p) => `<div class="card" style="border:2px solid #1F4E79">
     <h2>✏️ Edit: ${esc(p.name)}</h2>
-    <p class="small">Created on <b>${p.createdAt ? dayDate(p.createdAt) : "—"}</b> — this date never changes. Only fill what you want to change.</p>
+    <p class="small">Created on <b>${p.createdAt ? dayDate(p.createdAt) : "—"}</b> — this date never changes.</p>
     <div id="editMsg"></div>
     <label>Product name</label><input id="eName" value="${esc(p.name)}" />
     <label>Sell price</label><input id="eSell" type="number" min="0" value="${p.sellPrice}" />
@@ -225,12 +222,23 @@ async function renderStore(id, tab = "sale", msg = "") {
       ${msg ? `<div class="msg msg-ok">${esc(msg)}</div>` : ""}
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
+
+      <h2 style="margin-top:10px">📊 All-time money</h2>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD (money customers paid)</div></div>
+        <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 All-time SPENT (buying goods)</div></div>
+        <div class="stat"><div class="num" style="color:${trueProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(trueProfit)}</div><div class="lbl">✅ TRUE PROFIT (sold − spent)</div></div>
+        <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Money in stock now</div></div>
+      </div>
+
+      <h2>📅 Today</h2>
       <div class="stat-row">
         <div class="stat"><div class="num">${money(tMoney)}</div><div class="lbl">Today's money</div></div>
         <div class="stat"><div class="num">${money(tProfit)}</div><div class="lbl">Today's profit</div></div>
         <div class="stat"><div class="num">${tSales.length}</div><div class="lbl">Today's sales</div></div>
-        <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">All-time money</div></div>
+        <div class="stat"><div class="num">${d.totals.count}</div><div class="lbl">All-time sales</div></div>
       </div>
+
       <div class="tabs">
         <div class="tab ${tab === "sale" ? "active" : ""}" onclick="renderStore('${id}','sale')">➕ Record sale</div>
         <div class="tab ${tab === "stock" ? "active" : ""}" onclick="renderStore('${id}','stock')">📦 Stock</div>
@@ -293,7 +301,8 @@ async function renderStore(id, tab = "sale", msg = "") {
           ${d.sales.map((s) => `<tr>
             <td class="small">${fmtDate(s.date)}</td><td>${esc(s.productName)}</td>
             <td>${s.qty}</td><td>${money(s.amount)}</td>
-            <td style="color:#2e7d32"><b>${money(s.profit)}</b></td><td>${esc(s.worker || "—")}</td>
+            <td style="color:#2e7d32"><b>${money(s.amount - s.qty * (s.costPrice || 0))}</b></td>
+            <td>${esc(s.worker || "—")}</td>
           </tr>`).join("")}
         </table></div>`}
       </div></div>
@@ -314,7 +323,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <button class="btn btn-gray btn-block" onclick="doChangeOwnerPass()">Change owner password</button>
         <hr style="margin:16px 0">
         <button class="btn btn-green btn-block" onclick="doBackup()">💾 DOWNLOAD ALL MY DATA (backup)</button>
-        <p class="small">Saves everything — all stores, products, purchases, sales — as a file on your phone. Do this weekly!</p>
+        <p class="small">Saves everything as a file on your phone. Do this weekly!</p>
         <hr style="margin:16px 0">
         <button class="btn btn-red btn-block" onclick="doDeleteStore('${id}')">🗑️ DELETE this store</button>
       </div></div>` : ""}
@@ -335,12 +344,11 @@ async function doSale(id) {
       productId: val("saleProduct"),
       qty: Number(val("saleQty")),
       amount: val("saleAmount") === "" ? undefined : Number(val("saleAmount")),
-      worker: sellerName(id) }) }); // name locked from login — staff cannot change it
+      worker: sellerName(id) }) });
     renderStore(id, "sale", "Sale saved ✅");
   } catch (e) { document.getElementById("saleMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 
-// ---------- PRODUCT EDIT / RESTOCK ----------
 function startEdit(pid, id) { editingProduct = pid; renderStore(id, "stock"); }
 function cancelEdit(id) { editingProduct = null; renderStore(id, "stock"); }
 
@@ -354,10 +362,8 @@ async function doEditProduct(id, pid) {
     const file = document.getElementById("ePhoto").files[0];
 
     const finish = async (photo) => {
-      // 1) save edits (name, prices, optional new photo) — createdAt untouched
       await api(`/api/stores/${id}/products/${pid}`, { method: "PUT",
         body: JSON.stringify({ name, sellPrice: sell, costPrice: cost, photo }) });
-      // 2) if new stock arrived, record it with THIS batch's date + supplier
       if (newQty > 0) {
         await api(`/api/stores/${id}/products/${pid}/restock`, { method: "POST",
           body: JSON.stringify({ qty: newQty, costPrice: cost || undefined, supplier }) });
@@ -389,7 +395,7 @@ function doAddProduct(id) {
   const file = document.getElementById("pPhoto").files[0];
   const send = (photo) => api(`/api/stores/${id}/products`, { method: "POST",
       body: JSON.stringify({ name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo, supplier }) })
-    .then(() => renderStore(id, "stock", "Product added ✅ Purchase recorded with date & supplier."))
+    .then(() => renderStore(id, "stock", "Product added ✅ Purchase recorded."))
     .catch((e) => { document.getElementById("prodMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; });
   if (file) { const r = new FileReader();
     r.onload = () => send(r.result); r.readAsDataURL(file); }
@@ -418,7 +424,6 @@ async function doDeleteStore(id) {
     clearStoreLogin(); renderHome("Store deleted"); } catch (e) { alert(e.message); }
 }
 
-// ---------- DOWNLOAD FULL BACKUP (owner only) ----------
 async function doBackup() {
   try {
     const data = await api("/api/export");
@@ -427,7 +432,7 @@ async function doBackup() {
     a.href = URL.createObjectURL(blob);
     a.download = "my-stores-backup-" + new Date().toISOString().slice(0, 10) + ".json";
     document.body.appendChild(a); a.click(); a.remove();
-    alert("Backup downloaded ✅ Keep this file safe — it contains ALL your business data.");
+    alert("Backup downloaded ✅ Keep this file safe.");
   } catch (e) { alert(e.message); }
 }
 
