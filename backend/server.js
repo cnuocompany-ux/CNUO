@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v3 =====
-// owner-only goods + Nigerian server time + REQUIRED worker name on every sale
+// ===== MY STORES MANAGER — BACKEND v4 =====
+// purchase history + supplier + product editing (date preserved) + required worker name
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -60,7 +60,12 @@ function withCalc(store) {
     const remaining = p.qtyArrived - sold;
     const status = remaining <= 0 ? "FINISHED"
       : remaining <= (store.lowStock ?? db.lowStockDefault) ? "LOW STOCK" : "OK";
-    return { ...p, sold, remaining, status };
+    return {
+      ...p,
+      createdAt: p.createdAt || p.addedAt || null, // original creation date — NEVER changes
+      purchases: p.purchases || [],                // full purchase history with dates + suppliers
+      sold, remaining, status
+    };
   });
 }
 
@@ -157,27 +162,58 @@ app.delete("/api/stores/:id", ownerAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- PRODUCTS (OWNER ONLY — new goods arriving) ----------
+// ---------- PRODUCTS (OWNER ONLY) ----------
+// Add new goods — records the purchase: date, quantity, cost, and SUPPLIER (who you bought from)
 app.post("/api/stores/:id/products", ownerOnly, (req, res) => {
-  const { name, qtyArrived, costPrice, sellPrice, photo } = req.body;
+  const { name, qtyArrived, costPrice, sellPrice, photo, supplier } = req.body;
   if (!name || !(qtyArrived > 0)) return res.status(400).json({ error: "Name and quantity required" });
+  const now = new Date().toISOString();
   const p = {
     id: uid(), name, photo: photo || "",
-    qtyArrived: Number(qtyArrived), costPrice: Number(costPrice) || 0,
-    sellPrice: Number(sellPrice) || 0, addedAt: new Date().toISOString()
+    qtyArrived: Number(qtyArrived),
+    costPrice: Number(costPrice) || 0,
+    sellPrice: Number(sellPrice) || 0,
+    createdAt: now, // original date — editing later NEVER changes this
+    purchases: [{
+      id: uid(), qty: Number(qtyArrived),
+      costPrice: Number(costPrice) || 0,
+      supplier: (supplier || "").trim(),
+      date: now
+    }]
   };
   req.store.products.push(p); saveDB();
   res.json({ id: p.id });
 });
 
-// more stock arrived for an existing product (OWNER ONLY)
+// EDIT product — fix forgotten details. createdAt and purchase history stay untouched.
+app.put("/api/stores/:id/products/:pid", ownerOnly, (req, res) => {
+  const p = req.store.products.find((x) => x.id === req.params.pid);
+  if (!p) return res.status(404).json({ error: "Product not found" });
+  const { name, sellPrice, costPrice, photo } = req.body;
+  if (name !== undefined && String(name).trim()) p.name = String(name).trim();
+  if (sellPrice !== undefined && sellPrice !== "") p.sellPrice = Number(sellPrice);
+  if (costPrice !== undefined && costPrice !== "") p.costPrice = Number(costPrice);
+  if (photo) p.photo = photo;
+  saveDB();
+  res.json({ ok: true });
+});
+
+// RESTOCK — adds to total AND records this batch with its own date + supplier
 app.post("/api/stores/:id/products/:pid/restock", ownerOnly, (req, res) => {
   const p = req.store.products.find((x) => x.id === req.params.pid);
   if (!p) return res.status(404).json({ error: "Product not found" });
-  if (!(req.body.qty > 0)) return res.status(400).json({ error: "Quantity required" });
-  p.qtyArrived += Number(req.body.qty);
+  const qty = Number(req.body.qty);
+  if (!(qty > 0)) return res.status(400).json({ error: "Quantity required" });
+  p.qtyArrived += qty; // total quantity keeps growing — history shows each batch
   if (req.body.costPrice) p.costPrice = Number(req.body.costPrice);
   if (req.body.sellPrice) p.sellPrice = Number(req.body.sellPrice);
+  p.purchases = p.purchases || [];
+  p.purchases.push({
+    id: uid(), qty,
+    costPrice: req.body.costPrice ? Number(req.body.costPrice) : p.costPrice,
+    supplier: (req.body.supplier || "").trim(),
+    date: new Date().toISOString() // THIS batch's date — different from earlier batches
+  });
   saveDB();
   res.json({ ok: true });
 });
