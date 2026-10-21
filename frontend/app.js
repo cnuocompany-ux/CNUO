@@ -1,10 +1,11 @@
-// ===== MY STORES MANAGER — FRONTEND v3 =====
-// REQUIRED staff name at login + today's totals + owner-only goods + backup
+// ===== MY STORES MANAGER — FRONTEND v4 =====
+// purchase history + supplier + product edit + REQUIRED staff name + today's totals + backup
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
 let storeId = localStorage.getItem("storeId") || "";
 let selectedColor = "#1F4E79";
+let editingProduct = null; // product being edited right now
 
 const app = document.getElementById("app");
 const money = (n) => Number(n || 0).toLocaleString();
@@ -12,7 +13,14 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (iso) => { const d = new Date(iso);
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+const dayDate = (iso) => new Date(iso).toLocaleDateString();
 const sellerName = (id) => localStorage.getItem("seller_" + id) || "";
+const val = (x) => ((document.getElementById(x) || {}).value ?? "");
+
+// purchase history as one clear line: "Oct 20: 500 @ 3,000 from Chidi · Oct 23: 200 @ 3,100 from Balogun"
+const purchaseLine = (p) => (p.purchases || [])
+  .map((b) => `${dayDate(b.date)}: ${b.qty} @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}`)
+  .join(" · ");
 
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -39,7 +47,7 @@ function renderSetup(msg = "") {
     </div></div>`;
 }
 async function saveSetup() {
-  let url = document.getElementById("setupUrl").value.trim().replace(/\/+$/, "");
+  let url = val("setupUrl").trim().replace(/\/+$/, "");
   if (!url) return;
   localStorage.setItem("apiUrl", url);
   API = url;
@@ -91,7 +99,7 @@ function showOwnerLogin() {
 async function doOwnerLogin() {
   try {
     const r = await api("/api/owner/login", { method: "POST",
-      body: JSON.stringify({ password: document.getElementById("ofPass").value }) });
+      body: JSON.stringify({ password: val("ofPass") }) });
     ownerToken = r.token; localStorage.setItem("ownerToken", ownerToken);
     renderHome();
   } catch (e) { document.getElementById("ofMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
@@ -121,10 +129,8 @@ function pickColor(c) { selectedColor = c; showAddStore(); }
 async function doAddStore() {
   try {
     await api("/api/stores", { method: "POST", body: JSON.stringify({
-      name: document.getElementById("asName").value,
-      registeredName: document.getElementById("asReg").value,
-      password: document.getElementById("asPass").value,
-      color: selectedColor }) });
+      name: val("asName"), registeredName: val("asReg"),
+      password: val("asPass"), color: selectedColor }) });
     renderHome("Store created ✅ Share its name + password with the worker.");
   } catch (e) { document.getElementById("asMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
@@ -147,7 +153,7 @@ async function openStore(id, name) {
 }
 async function doStoreLogin(id) {
   // NAME IS MANDATORY — refuse to open the store without it
-  const nm = ((document.getElementById("slName") || {}).value || "").trim();
+  const nm = val("slName").trim();
   if (!nm) {
     document.getElementById("slMsg").innerHTML =
       `<div class="msg msg-error">⚠️ Type your name first. It is required — every sale must show who made it.</div>`;
@@ -155,7 +161,7 @@ async function doStoreLogin(id) {
   }
   try {
     const r = await api(`/api/stores/${id}/login`, { method: "POST",
-      body: JSON.stringify({ password: document.getElementById("slPass").value }) });
+      body: JSON.stringify({ password: val("slPass") }) });
     storeToken = r.token; localStorage.setItem("storeToken", storeToken);
     localStorage.setItem("seller_" + id, nm);
     renderStore(id);
@@ -168,6 +174,9 @@ async function renderStore(id, tab = "sale", msg = "") {
   let d;
   try { d = await api(`/api/stores/${id}`); }
   catch (e) { clearStoreLogin(); return openStore(id, "this store"); }
+  // stop editing if the product no longer exists
+  if (editingProduct && !d.products.find((p) => p.id === editingProduct)) editingProduct = null;
+
   const badge = (s) => s === "FINISHED" ? `<span class="badge badge-fin">FINISHED</span>`
     : s === "LOW STOCK" ? `<span class="badge badge-low">LOW STOCK</span>`
     : `<span class="badge badge-ok">OK</span>`;
@@ -177,6 +186,37 @@ async function renderStore(id, tab = "sale", msg = "") {
   const tSales = d.sales.filter((s) => new Date(s.date).toDateString() === today);
   const tMoney = tSales.reduce((a, s) => a + s.amount, 0);
   const tProfit = tSales.reduce((a, s) => a + s.profit, 0);
+
+  // one table row per product, including added-date + purchase history (clear, not confusing)
+  const productRow = (p, ownerView) => `<tr>
+    <td>${p.photo ? `<img class="thumb" src="${p.photo}">` : ""}</td>
+    <td><b>${esc(p.name)}</b><br>
+      <span class="small">added: ${p.createdAt ? dayDate(p.createdAt) : "—"} · cost: ${money(p.costPrice)}</span><br>
+      <span class="small" style="color:#555">📥 ${purchaseLine(p) || "no purchase records"}</span></td>
+    <td>${p.qtyArrived}</td><td>${p.sold}</td><td><b>${p.remaining}</b></td>
+    <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
+    ${ownerView ? `<td><button class="btn btn-gray" onclick="startEdit('${p.id}','${id}')">✏️ Edit / +Stock</button>
+        <button class="btn btn-red" onclick="doDeleteProduct('${id}','${p.id}')">✕</button></td>` : ""}
+  </tr>`;
+
+  // edit form: fix details AND/OR add new stock with supplier — original date never changes
+  const editForm = (p) => `<div class="card" style="border:2px solid #1F4E79">
+    <h2>✏️ Edit: ${esc(p.name)}</h2>
+    <p class="small">Created on <b>${p.createdAt ? dayDate(p.createdAt) : "—"}</b> — this date never changes. Only fill what you want to change.</p>
+    <div id="editMsg"></div>
+    <label>Product name</label><input id="eName" value="${esc(p.name)}" />
+    <label>Sell price</label><input id="eSell" type="number" min="0" value="${p.sellPrice}" />
+    <label>Cost price</label><input id="eCost" type="number" min="0" value="${p.costPrice}" />
+    <label>📦 Add more stock (leave 0 if none arrived)</label>
+    <input id="eQty" type="number" min="0" value="0" />
+    <label>Supplier — who did you buy the new stock from?</label>
+    <input id="eSupplier" placeholder="e.g. Chidi Market" />
+    <label>Change photo (optional — leave empty to keep current)</label>
+    <input id="ePhoto" type="file" accept="image/*" />
+    ${p.photo ? `<img class="thumb" src="${p.photo}" style="margin-top:6px">` : ""}
+    <button class="btn btn-green btn-block" onclick="doEditProduct('${id}','${p.id}')">💾 Save changes</button>
+    <button class="btn btn-gray btn-block" onclick="cancelEdit('${id}')">Cancel</button>
+  </div>`;
 
   app.innerHTML = `<div class="topbar" style="background:${esc(d.color)}">
       <h1>🏪 ${esc(d.name)}</h1>
@@ -205,7 +245,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <select id="saleProduct" onchange="prefillAmount()">
           <option value="">-- choose product --</option>
           ${d.products.filter((p) => p.remaining > 0).map((p) =>
-            `<option value="${p.id}" data-price="${p.sellPrice}" data-remain="${p.remaining}">
+            `<option value="${p.id}" data-price="${p.sellPrice}">
               ${esc(p.name)} (${p.remaining} left)</option>`).join("")}
         </select>
         <label>Quantity sold</label>
@@ -213,23 +253,17 @@ async function renderStore(id, tab = "sale", msg = "") {
         <label>Amount received (auto-fills with your set price — change it if sold higher)</label>
         <input id="saleAmount" type="number" min="0" />
         <button class="btn btn-green btn-block" onclick="doSale('${id}')">💾 Save sale</button>
-        <p class="small">Seller: <b>${esc(sellerName(id) || "—")}</b> (name locked from login — every sale will show this name)</p>
+        <p class="small">Seller: <b>${esc(sellerName(id) || "—")}</b> (name locked from login)</p>
       </div></div>
 
       <div class="section ${tab === "stock" ? "active" : ""}">
       ${d.isOwner ? `<div class="card">
         <h2>Stock</h2>
+        ${editingProduct ? editForm(d.products.find((p) => p.id === editingProduct)) : ""}
         ${d.products.length === 0 ? "<p>No products yet. Add your first goods below.</p>" : `
         <div style="overflow-x:auto"><table>
-          <tr><th></th><th>Product</th><th>Arrived</th><th>Sold</th><th>Left</th><th>Status</th><th>Sell price</th><th></th></tr>
-          ${d.products.map((p) => `<tr>
-            <td>${p.photo ? `<img class="thumb" src="${p.photo}">` : ""}</td>
-            <td><b>${esc(p.name)}</b><br><span class="small">cost: ${money(p.costPrice)}</span></td>
-            <td>${p.qtyArrived}</td><td>${p.sold}</td><td><b>${p.remaining}</b></td>
-            <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
-            <td><button class="btn btn-gray" onclick="doRestock('${id}','${p.id}')">+ Stock</button>
-                <button class="btn btn-red" onclick="doDeleteProduct('${id}','${p.id}')">✕</button></td>
-          </tr>`).join("")}
+          <tr><th></th><th>Product (added date + purchase history)</th><th>Total arrived</th><th>Sold</th><th>Left</th><th>Status</th><th>Sell price</th><th></th></tr>
+          ${d.products.map((p) => productRow(p, true)).join("")}
         </table></div>`}
         <hr style="margin:16px 0">
         <h2>Add new goods (owner only)</h2>
@@ -239,18 +273,14 @@ async function renderStore(id, tab = "sale", msg = "") {
         <label>Quantity arrived</label><input id="pQty" type="number" min="1" />
         <label>Cost price — what YOU paid for one</label><input id="pCost" type="number" min="0" />
         <label>Sell price — what the customer pays</label><input id="pSell" type="number" min="0" />
+        <label>Supplier — who did you buy from?</label><input id="pSupplier" placeholder="e.g. Chidi Market, Lagos" />
         <button class="btn btn-primary btn-block" onclick="doAddProduct('${id}')">📦 Save product</button>
       </div>` : `<div class="card"><h2>Stock</h2>
         <p>👀 View only — only the owner can add goods.</p>
         ${d.products.length === 0 ? "<p>No products yet.</p>" : `
         <div style="overflow-x:auto"><table>
-          <tr><th></th><th>Product</th><th>Arrived</th><th>Sold</th><th>Left</th><th>Status</th><th>Sell price</th></tr>
-          ${d.products.map((p) => `<tr>
-            <td>${p.photo ? `<img class="thumb" src="${p.photo}">` : ""}</td>
-            <td><b>${esc(p.name)}</b></td>
-            <td>${p.qtyArrived}</td><td>${p.sold}</td><td><b>${p.remaining}</b></td>
-            <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
-          </tr>`).join("")}
+          <tr><th></th><th>Product</th><th>Total arrived</th><th>Sold</th><th>Left</th><th>Status</th><th>Sell price</th></tr>
+          ${d.products.map((p) => productRow(p, false)).join("")}
         </table></div>`}
       </div>`}
       </div>
@@ -284,7 +314,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <button class="btn btn-gray btn-block" onclick="doChangeOwnerPass()">Change owner password</button>
         <hr style="margin:16px 0">
         <button class="btn btn-green btn-block" onclick="doBackup()">💾 DOWNLOAD ALL MY DATA (backup)</button>
-        <p class="small">Saves everything — all stores, products, sales — as a file on your phone. Do this weekly!</p>
+        <p class="small">Saves everything — all stores, products, purchases, sales — as a file on your phone. Do this weekly!</p>
         <hr style="margin:16px 0">
         <button class="btn btn-red btn-block" onclick="doDeleteStore('${id}')">🗑️ DELETE this store</button>
       </div></div>` : ""}
@@ -301,40 +331,65 @@ function prefillAmount() {
 
 async function doSale(id) {
   try {
-    const qty = Number(document.getElementById("saleQty").value);
-    const amount = document.getElementById("saleAmount").value;
     await api(`/api/stores/${id}/sales`, { method: "POST", body: JSON.stringify({
-      productId: document.getElementById("saleProduct").value,
-      qty,
-      amount: amount === "" ? undefined : Number(amount),
+      productId: val("saleProduct"),
+      qty: Number(val("saleQty")),
+      amount: val("saleAmount") === "" ? undefined : Number(val("saleAmount")),
       worker: sellerName(id) }) }); // name locked from login — staff cannot change it
     renderStore(id, "sale", "Sale saved ✅");
   } catch (e) { document.getElementById("saleMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 
-function doRestock(id, pid) {
-  const qty = prompt("How many more arrived?");
-  if (!qty || !(qty > 0)) return;
-  api(`/api/stores/${id}/products/${pid}/restock`, { method: "POST",
-    body: JSON.stringify({ qty: Number(qty) }) })
-    .then(() => renderStore(id, "stock", "Stock updated ✅"))
-    .catch((e) => alert(e.message));
+// ---------- PRODUCT EDIT / RESTOCK ----------
+function startEdit(pid, id) { editingProduct = pid; renderStore(id, "stock"); }
+function cancelEdit(id) { editingProduct = null; renderStore(id, "stock"); }
+
+async function doEditProduct(id, pid) {
+  try {
+    const name = val("eName").trim();
+    const sell = val("eSell");
+    const cost = val("eCost");
+    const newQty = Number(val("eQty") || 0);
+    const supplier = val("eSupplier").trim();
+    const file = document.getElementById("ePhoto").files[0];
+
+    const finish = async (photo) => {
+      // 1) save edits (name, prices, optional new photo) — createdAt untouched
+      await api(`/api/stores/${id}/products/${pid}`, { method: "PUT",
+        body: JSON.stringify({ name, sellPrice: sell, costPrice: cost, photo }) });
+      // 2) if new stock arrived, record it with THIS batch's date + supplier
+      if (newQty > 0) {
+        await api(`/api/stores/${id}/products/${pid}/restock`, { method: "POST",
+          body: JSON.stringify({ qty: newQty, costPrice: cost || undefined, supplier }) });
+      }
+      editingProduct = null;
+      renderStore(id, "stock", "Product updated ✅ Original date kept.");
+    };
+    if (file) { const r = new FileReader();
+      r.onload = () => finish(r.result); r.readAsDataURL(file); }
+    else await finish("");
+  } catch (e) {
+    const m = document.getElementById("editMsg");
+    if (m) m.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; else alert(e.message);
+  }
 }
+
 async function doDeleteProduct(id, pid) {
-  if (!confirm("Delete this product and its sales history?")) return;
+  if (!confirm("Delete this product, its purchase history and sales?")) return;
   try { await api(`/api/stores/${id}/products/${pid}`, { method: "DELETE" });
     renderStore(id, "stock", "Product deleted"); } catch (e) { alert(e.message); }
 }
 
 function doAddProduct(id) {
-  const name = document.getElementById("pName").value;
-  const qty = Number(document.getElementById("pQty").value);
-  const cost = Number(document.getElementById("pCost").value);
-  const sell = Number(document.getElementById("pSell").value);
+  const name = val("pName");
+  const qty = Number(val("pQty"));
+  const cost = Number(val("pCost"));
+  const sell = Number(val("pSell"));
+  const supplier = val("pSupplier");
   const file = document.getElementById("pPhoto").files[0];
   const send = (photo) => api(`/api/stores/${id}/products`, { method: "POST",
-      body: JSON.stringify({ name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo }) })
-    .then(() => renderStore(id, "stock", "Product added ✅"))
+      body: JSON.stringify({ name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo, supplier }) })
+    .then(() => renderStore(id, "stock", "Product added ✅ Purchase recorded with date & supplier."))
     .catch((e) => { document.getElementById("prodMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; });
   if (file) { const r = new FileReader();
     r.onload = () => send(r.result); r.readAsDataURL(file); }
@@ -342,20 +397,18 @@ function doAddProduct(id) {
 }
 
 async function doUpdateStore(id) {
-  const pass = document.getElementById("setPass").value;
+  const pass = val("setPass");
   try {
     await api(`/api/stores/${id}`, { method: "PUT", body: JSON.stringify({
-      name: document.getElementById("setName").value,
-      registeredName: document.getElementById("setReg").value,
-      lowStock: Number(document.getElementById("setLow").value),
-      newPassword: pass || undefined }) });
+      name: val("setName"), registeredName: val("setReg"),
+      lowStock: Number(val("setLow")), newPassword: pass || undefined }) });
     if (pass) { clearStoreLogin(); return renderHome("Password changed. Old worker can no longer enter. ✅"); }
     renderStore(id, "settings", "Settings saved ✅");
   } catch (e) { document.getElementById("setMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 async function doChangeOwnerPass() {
   try { await api("/api/owner/password", { method: "POST",
-    body: JSON.stringify({ newPassword: document.getElementById("setOwnerPass").value }) });
+    body: JSON.stringify({ newPassword: val("setOwnerPass") }) });
     alert("Owner password changed ✅"); }
   catch (e) { alert(e.message); }
 }
