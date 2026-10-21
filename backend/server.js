@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v6 =====
-// PERMANENT database = MongoDB (records survive redeploys & crashes — NEVER clear)
+// ===== MY STORES MANAGER — BACKEND v7 =====
+// MongoDB permanent storage + full money dashboard (sold / spent / true profit / stock value)
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -16,11 +16,11 @@ app.use(express.json({ limit: "20mb" })); // needed for product photos
 const DATA_FILE = path.join(__dirname, "data.json");
 const PORT = process.env.PORT || 3000;
 
-// ---------- MongoDB = your permanent database (set MONGO_URL in Render) ----------
+// ---------- MongoDB = your permanent database ----------
 const MONGO_URL = process.env.MONGO_URL || "";
 let mongoCol = null;
 
-// ---------- optional GitHub backup (leave empty if not used) ----------
+// ---------- optional GitHub backup ----------
 const GH_TOKEN = process.env.GH_TOKEN || "";
 const GH_REPO = process.env.GH_REPO || "";
 const GH_BRANCH = process.env.GH_BRANCH || "main";
@@ -32,7 +32,7 @@ const ghUrl = (q) => `https://api.github.com/repos/${GH_REPO}/contents/${GH_PATH
 const hash = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const uid = () => crypto.randomBytes(8).toString("hex");
 
-// ---------- LOAD: MongoDB first, local file only as emergency backup ----------
+// ---------- LOAD: MongoDB first ----------
 async function loadDB() {
   if (MONGO_URL) {
     try {
@@ -52,7 +52,7 @@ async function loadDB() {
   return { ownerPassword: hash("owner123"), lowStockDefault: 5, stores: [] };
 }
 
-// ---------- SAVE: memory is instant for the user; MongoDB + GitHub saved shortly after ----------
+// ---------- SAVE ----------
 let saveTimer = null;
 let ghQueue = Promise.resolve();
 const saveDB = () => {
@@ -83,7 +83,7 @@ const saveDB = () => {
   }, 800);
 };
 
-// ---------- login tokens (memory only — logins reset on restart, DATA never does) ----------
+// ---------- login tokens ----------
 const ownerTokens = new Set();
 const storeTokens = {}; // token -> storeId
 
@@ -154,15 +154,31 @@ app.get("/api/stores/:id", (req, res) => {
   if (!isOwner && sid !== s.id) return res.status(401).json({ error: "Login required" });
   const products = withCalc(s);
   const totalIn = s.sales.reduce((a, x) => a + x.amount, 0);
-  const profit = s.sales.reduce((a, x) => a + x.profit, 0);
+
+  // ====== FULL MONEY DASHBOARD — exact calculations, owner thinks about nothing ======
+  // All money ever spent buying goods (batch by batch from purchase history)
+  let spent = 0;
+  for (const p of s.products) {
+    for (const b of (p.purchases || [])) spent += (b.qty || 0) * (b.costPrice || 0);
+  }
+  // Money still inside unsold stock (remaining items at their cost price)
+  let stockValue = 0;
+  for (const p of products) stockValue += Math.max(0, p.remaining) * (p.costPrice || 0);
+
   res.json({
     id: s.id, name: s.name, registeredName: s.registeredName, color: s.color,
     lowStock: s.lowStock ?? db.lowStockDefault,
     isOwner,
     products,
     sales: s.sales.slice().reverse(),
-    totals: { totalIn, profit, count: s.sales.length,
-      alerts: products.filter((p) => p.status !== "OK").length }
+    totals: {
+      totalIn,                          // all-time money customers paid
+      spent,                            // all-time money used to buy goods
+      profit: totalIn - spent,          // TRUE PROFIT = sold − spent
+      stockValue,                       // money sitting in unsold stock
+      count: s.sales.length,
+      alerts: products.filter((p) => p.status !== "OK").length
+    }
   });
 });
 
@@ -287,7 +303,6 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
   const sale = {
     id: uid(), productId: p.id, productName: p.name,
     qty: Number(qty), amount: amt, costPrice: p.costPrice,
-    profit: amt - p.costPrice * qty,
     worker: String(worker).trim(),
     date: new Date().toISOString() // SERVER time — cannot be faked
   };
@@ -297,7 +312,7 @@ app.post("/api/stores/:id/sales", storeAuth, (req, res) => {
 
 app.get("/", (req, res) => res.send("My Stores API is running ✅ — data permanently stored in MongoDB"));
 
-// ---------- START: connect to permanent database FIRST, then serve ----------
+// ---------- START ----------
 let db;
 loadDB().then((loaded) => {
   db = loaded;
