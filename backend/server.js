@@ -1,6 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v9 =====
-// ROOT FIX: one MongoDB file PER STORE (16MB limit becomes unreachable)
-// + photos compressed + oversized photos rejected + every save confirmed
+// ===== MY STORES MANAGER — BACKEND v9.1 =====
+// AUTO-MIGRATES old data into per-store storage on first run.
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -33,22 +32,46 @@ async function connectMongo() {
   } catch (e) { console.error("MongoDB connection error:", e.message); }
 }
 
-// ---------- password hashing ----------
 const hash = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const uid = () => crypto.randomBytes(8).toString("hex");
 
-// ---------- LOAD: meta file + one file per store ----------
+// ---------- LOAD: reads NEW format, and MIGRATES old "main" document if found ----------
 async function loadDB() {
   await connectMongo();
   if (mongoCol) {
     try {
       const meta = await mongoCol.findOne({ _id: "meta" });
       const storeDocs = await mongoCol.find({ _id: { $regex: /^store:/ } }).toArray();
-      console.log("✅ Data loaded from MongoDB (permanent) — " + storeDocs.length + " store(s)");
+      let stores = storeDocs.map((d) => d.data);
+
+      // MIGRATION: old format stored everything in one document called "main"
+      const old = await mongoCol.findOne({ _id: "main" });
+      if (old && old.data && Array.isArray(old.data.stores)) {
+        console.log("📦 Found old-format data — migrating automatically...");
+        let added = 0;
+        for (const s of old.data.stores) {
+          if (s && s.id && !stores.find((x) => x.id === s.id)) { stores.push(s); added++; }
+        }
+        const migrated = {
+          ownerPassword: (meta && meta.ownerPassword) || old.data.ownerPassword || hash("owner123"),
+          lowStockDefault: (meta && meta.lowStockDefault) || old.data.lowStockDefault || 5,
+          stores
+        };
+        // immediately write everything in the NEW format
+        await mongoCol.updateOne({ _id: "meta" },
+          { $set: { ownerPassword: migrated.ownerPassword, lowStockDefault: migrated.lowStockDefault } }, { upsert: true });
+        for (const s of migrated.stores) {
+          await mongoCol.updateOne({ _id: "store:" + s.id }, { $set: { data: s } }, { upsert: true });
+        }
+        console.log("✅ Migration complete — " + added + " store(s) recovered");
+        return migrated;
+      }
+
+      console.log("✅ Data loaded from MongoDB — " + stores.length + " store(s)");
       return {
         ownerPassword: (meta && meta.ownerPassword) || hash("owner123"),
         lowStockDefault: (meta && meta.lowStockDefault) || 5,
-        stores: storeDocs.map((d) => d.data)
+        stores
       };
     } catch (e) { console.error("Mongo load failed:", e.message); }
   }
@@ -56,20 +79,16 @@ async function loadDB() {
   return { ownerPassword: hash("owner123"), lowStockDefault: 5, stores: [] };
 }
 
-// ---------- SAVE: meta + each store as its OWN file (no more 16MB wall) ----------
+// ---------- SAVE: one file per store ----------
 async function saveDB() {
   try { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch (e) {}
   if (mongoCol) {
     const doSave = async () => {
-      await mongoCol.updateOne(
-        { _id: "meta" },
-        { $set: { ownerPassword: db.ownerPassword, lowStockDefault: db.lowStockDefault } },
-        { upsert: true }
-      );
+      await mongoCol.updateOne({ _id: "meta" },
+        { $set: { ownerPassword: db.ownerPassword, lowStockDefault: db.lowStockDefault } }, { upsert: true });
       for (const s of db.stores) {
         await mongoCol.updateOne({ _id: "store:" + s.id }, { $set: { data: s } }, { upsert: true });
       }
-      // clean up files of deleted stores
       const existing = await mongoCol.find({ _id: { $regex: /^store:/ } }).project({ _id: 1 }).toArray();
       for (const d of existing) {
         const sid = d._id.replace("store:", "");
@@ -91,12 +110,12 @@ async function deleteStoreDoc(id) {
   try { await mongoCol.deleteOne({ _id: "store:" + id }); } catch (e) {}
 }
 
-// ---------- PHOTOS: compress to small JPEG. Returns NULL if it cannot be made safe. ----------
+// ---------- PHOTOS ----------
 async function shrinkPhoto(dataUrl) {
   if (!dataUrl || !String(dataUrl).startsWith("data:image")) return dataUrl || "";
   try {
     const buf = Buffer.from(String(dataUrl).split(",")[1], "base64");
-    if (buf.length < 60 * 1024) return dataUrl; // already small
+    if (buf.length < 60 * 1024) return dataUrl;
     const img = await Jimp.read(buf);
     img.scaleToFit(512, 512);
     img.quality(68);
@@ -104,7 +123,7 @@ async function shrinkPhoto(dataUrl) {
     return "data:image/jpeg;base64," + out.toString("base64");
   } catch (e) {
     console.error("Photo could not be processed:", e.message);
-    return null; // caller must reject — never store unprocessable photos
+    return null;
   }
 }
 
@@ -237,7 +256,7 @@ app.post("/api/stores/:id/products", ownerOnly, async (req, res) => {
   if (!name || !(qtyArrived > 0)) return res.status(400).json({ error: "Name and quantity required" });
   const photo = await shrinkPhoto(req.body.photo);
   if (photo === null) {
-    return res.status(400).json({ error: "This photo format is too large or unsupported. Please use a normal JPG/PNG photo (take a new picture with the camera set to JPG)." });
+    return res.status(400).json({ error: "This photo format is too large or unsupported. Please use a normal JPG/PNG photo." });
   }
   const now = new Date().toISOString();
   const p = {
@@ -319,7 +338,7 @@ app.post("/api/stores/:id/sales", storeAuth, async (req, res) => {
     date: new Date().toISOString()
   };
   req.store.sales.push(sale);
-  await saveDB(); // MongoDB FIRST — confirmed before "saved" is shown
+  await saveDB();
   res.json({ id: sale.id });
 });
 
