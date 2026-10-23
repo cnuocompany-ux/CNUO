@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v9.1 =====
-// AUTO-MIGRATES old data into per-store storage on first run.
+// ===== MY STORES MANAGER — BACKEND v9.2 =====
+// v9.1 + AUTO-CLEANUP: shrinks/removes legacy oversized photos on startup
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -17,7 +17,6 @@ app.use(express.json({ limit: "25mb" }));
 const DATA_FILE = path.join(__dirname, "data.json");
 const PORT = process.env.PORT || 3000;
 
-// ---------- MongoDB ----------
 const MONGO_URL = process.env.MONGO_URL || "";
 let mongoClient = null;
 let mongoCol = null;
@@ -35,7 +34,6 @@ async function connectMongo() {
 const hash = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const uid = () => crypto.randomBytes(8).toString("hex");
 
-// ---------- LOAD: reads NEW format, and MIGRATES old "main" document if found ----------
 async function loadDB() {
   await connectMongo();
   if (mongoCol) {
@@ -44,10 +42,10 @@ async function loadDB() {
       const storeDocs = await mongoCol.find({ _id: { $regex: /^store:/ } }).toArray();
       let stores = storeDocs.map((d) => d.data);
 
-      // MIGRATION: old format stored everything in one document called "main"
+      // MIGRATION: old "main" document → per-store files (only if not already done)
       const old = await mongoCol.findOne({ _id: "main" });
       if (old && old.data && Array.isArray(old.data.stores)) {
-        console.log("📦 Found old-format data — migrating automatically...");
+        console.log("📦 Old-format data found — merging...");
         let added = 0;
         for (const s of old.data.stores) {
           if (s && s.id && !stores.find((x) => x.id === s.id)) { stores.push(s); added++; }
@@ -57,13 +55,12 @@ async function loadDB() {
           lowStockDefault: (meta && meta.lowStockDefault) || old.data.lowStockDefault || 5,
           stores
         };
-        // immediately write everything in the NEW format
         await mongoCol.updateOne({ _id: "meta" },
           { $set: { ownerPassword: migrated.ownerPassword, lowStockDefault: migrated.lowStockDefault } }, { upsert: true });
         for (const s of migrated.stores) {
           await mongoCol.updateOne({ _id: "store:" + s.id }, { $set: { data: s } }, { upsert: true });
         }
-        console.log("✅ Migration complete — " + added + " store(s) recovered");
+        console.log("✅ Merge complete — " + added + " store(s) added");
         return migrated;
       }
 
@@ -79,7 +76,6 @@ async function loadDB() {
   return { ownerPassword: hash("owner123"), lowStockDefault: 5, stores: [] };
 }
 
-// ---------- SAVE: one file per store ----------
 async function saveDB() {
   try { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch (e) {}
   if (mongoCol) {
@@ -110,7 +106,6 @@ async function deleteStoreDoc(id) {
   try { await mongoCol.deleteOne({ _id: "store:" + id }); } catch (e) {}
 }
 
-// ---------- PHOTOS ----------
 async function shrinkPhoto(dataUrl) {
   if (!dataUrl || !String(dataUrl).startsWith("data:image")) return dataUrl || "";
   try {
@@ -127,7 +122,6 @@ async function shrinkPhoto(dataUrl) {
   }
 }
 
-// ---------- login tokens ----------
 const ownerTokens = new Set();
 const storeTokens = {};
 
@@ -160,7 +154,6 @@ function withCalc(store) {
   });
 }
 
-// ---------- OWNER AUTH ----------
 app.post("/api/owner/login", (req, res) => {
   if (hash(req.body.password || "") === db.ownerPassword) {
     const t = uid(); ownerTokens.add(t);
@@ -178,7 +171,6 @@ app.post("/api/owner/password", ownerAuth, async (req, res) => {
 
 app.get("/api/export", ownerAuth, (req, res) => res.json(db));
 
-// ---------- STORES ----------
 app.get("/api/stores", (req, res) => {
   res.json(db.stores.map((s) => ({ id: s.id, name: s.name, registeredName: s.registeredName, color: s.color })));
 });
@@ -250,7 +242,6 @@ app.delete("/api/stores/:id", ownerAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- PRODUCTS ----------
 app.post("/api/stores/:id/products", ownerOnly, async (req, res) => {
   const { name, qtyArrived, costPrice, sellPrice, supplier } = req.body;
   if (!name || !(qtyArrived > 0)) return res.status(400).json({ error: "Name and quantity required" });
@@ -318,7 +309,6 @@ app.delete("/api/stores/:id/products/:pid", ownerAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- SALES ----------
 app.post("/api/stores/:id/sales", storeAuth, async (req, res) => {
   const { productId, qty, amount, worker } = req.body;
   if (!worker || !String(worker).trim()) {
@@ -344,9 +334,24 @@ app.post("/api/stores/:id/sales", storeAuth, async (req, res) => {
 
 app.get("/", (req, res) => res.send("My Stores API is running ✅ — per-store permanent storage in MongoDB"));
 
-// ---------- START ----------
+// ---------- START + legacy photo cleanup ----------
 let db;
-loadDB().then((loaded) => {
+loadDB().then(async (loaded) => {
   db = loaded;
+  // one-time cleanup of OLD oversized photos (added before auto-compression existed)
+  let cleaned = 0, removed = 0;
+  for (const s of db.stores) {
+    for (const p of s.products || []) {
+      if (p.photo && p.photo.length > 120 * 1024) {
+        const shrunk = await shrinkPhoto(p.photo);
+        if (shrunk && shrunk.length <= 120 * 1024) { p.photo = shrunk; cleaned++; }
+        else { p.photo = ""; removed++; } // could not be saved safely — drop it
+      }
+    }
+  }
+  if (cleaned || removed) {
+    console.log("🖼️ Old photos fixed: " + cleaned + " shrunk, " + removed + " removed (re-add them from your phone if needed)");
+    await saveDB();
+  }
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 });
