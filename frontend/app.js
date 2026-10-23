@@ -1,14 +1,20 @@
-// ===== MY STORES MANAGER — FRONTEND v7 =====
-// Money dashboard: sold / spent / TRUE profit / stock value + all previous features
+// ===== MY STORES MANAGER — FRONTEND v11 =====
+// v10 (halves, owner corrections, double-tap block) + SPEED: photos load in background
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
 let storeId = localStorage.getItem("storeId") || "";
 let selectedColor = "#1F4E79";
 let editingProduct = null;
+let saleSaving = false;
+const photoCache = {}; // storeId -> { at, photos } — photos never block the screen
 
 const app = document.getElementById("app");
-const money = (n) => Number(n || 0).toLocaleString();
+const money = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+const fmtQty = (n) => {
+  const r = Math.round(Number(n || 0) * 100) / 100;
+  return Number.isInteger(r) ? String(r) : String(parseFloat(r.toFixed(2)));
+};
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (iso) => { const d = new Date(iso);
@@ -18,7 +24,7 @@ const sellerName = (id) => localStorage.getItem("seller_" + id) || "";
 const val = (x) => ((document.getElementById(x) || {}).value ?? "");
 
 const purchaseLine = (p) => (p.purchases || [])
-  .map((b) => `${dayDate(b.date)}: ${b.qty} @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}`)
+  .map((b) => `${dayDate(b.date)}: ${fmtQty(b.qty)} @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}`)
   .join(" · ");
 
 async function api(path, opts = {}) {
@@ -31,14 +37,35 @@ async function api(path, opts = {}) {
   return data;
 }
 
-// ================= SETUP SCREEN =================
+// ---------- photos: load in background, never block the screen ----------
+async function ensurePhotos(id, photosAt) {
+  if (photoCache[id] && photoCache[id].at === photosAt) { applyPhotos(id); return; }
+  try {
+    const r = await api(`/api/stores/${id}/photos`);
+    photoCache[id] = { at: r.photosAt, photos: r.photos || {} };
+    applyPhotos(id);
+  } catch (e) {}
+}
+function applyPhotos(id) {
+  const c = photoCache[id];
+  if (!c) return;
+  document.querySelectorAll("img[data-pid]").forEach((img) => {
+    const p = c.photos[img.dataset.pid];
+    if (p) { img.src = p; img.style.display = ""; }
+  });
+}
+function getCachedPhoto(pid) {
+  for (const k in photoCache) { if (photoCache[k].photos && photoCache[k].photos[pid]) return photoCache[k].photos[pid]; }
+  return "";
+}
+
+// ================= SETUP =================
 function renderSetup(msg = "") {
   app.innerHTML = `<div class="container">
     <div class="topbar"><h1>🏪 My Stores Manager</h1></div>
     <div class="card">
       <h2>Welcome! One-time setup</h2>
-      <p class="small">Paste the web address (URL) of your backend from Render.
-      It looks like: https://my-stores.onrender.com</p>
+      <p class="small">Paste the web address (URL) of your backend from Render.</p>
       ${msg ? `<div class="msg msg-error">${esc(msg)}</div>` : ""}
       <label>Backend URL from Render</label>
       <input id="setupUrl" placeholder="https://your-app.onrender.com" />
@@ -68,7 +95,7 @@ async function renderHome(msg = "") {
     <div class="container">
       ${msg ? `<div class="msg msg-ok">${esc(msg)}</div>` : ""}
       <div id="homeMain">
-        <p class="small">Click a store and enter its password to open it. Owner login is for adding stores and seeing everything.</p>
+        <p class="small">Click a store and enter its password to open it.</p>
         <div class="store-grid">
           ${stores.map((s) => `
             <div class="store-card" style="background:${esc(s.color)}" onclick="openStore('${s.id}', '${esc(s.name)}')">
@@ -91,7 +118,6 @@ function showOwnerLogin() {
     <label>Owner password</label><input id="ofPass" type="password" />
     <button class="btn btn-primary btn-block" onclick="doOwnerLogin()">Login</button>
     <button class="btn btn-gray btn-block" onclick="renderHome()">Cancel</button>
-    <p class="small">First time? Default password is <b>owner123</b>. Change it after login (Settings).</p>
   </div>`;
 }
 async function doOwnerLogin() {
@@ -128,7 +154,7 @@ async function doAddStore() {
     await api("/api/stores", { method: "POST", body: JSON.stringify({
       name: val("asName"), registeredName: val("asReg"),
       password: val("asPass"), color: selectedColor }) });
-    renderHome("Store created ✅ Share its name + password with the worker.");
+    renderHome("Store created ✅");
   } catch (e) { document.getElementById("asMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 
@@ -145,14 +171,13 @@ async function openStore(id, name) {
       <input id="slName" placeholder="e.g. Ada" value="${esc(sellerName(id))}" />
       <label>Password</label><input id="slPass" type="password" />
       <button class="btn btn-primary btn-block" onclick="doStoreLogin('${id}')">Open store & start selling</button>
-      <p class="small">Your name is required. Every sale you make today will carry your name and the real date.</p>
     </div></div>`;
 }
 async function doStoreLogin(id) {
   const nm = val("slName").trim();
   if (!nm) {
     document.getElementById("slMsg").innerHTML =
-      `<div class="msg msg-error">⚠️ Type your name first. It is required — every sale must show who made it.</div>`;
+      `<div class="msg msg-error">⚠️ Type your name first. It is required.</div>`;
     return;
   }
   try {
@@ -176,41 +201,42 @@ async function renderStore(id, tab = "sale", msg = "") {
     : s === "LOW STOCK" ? `<span class="badge badge-low">LOW STOCK</span>`
     : `<span class="badge badge-ok">OK</span>`;
 
-  // today's numbers
   const today = new Date().toDateString();
   const tSales = d.sales.filter((s) => new Date(s.date).toDateString() === today);
   const tMoney = tSales.reduce((a, s) => a + s.amount, 0);
-  // per-sale profit (sold amount minus that product's cost)
   const tProfit = tSales.reduce((a, s) => a + (s.amount - s.qty * (s.costPrice || 0)), 0);
-
-  // ====== TRUE PROFIT = everything customers paid − everything spent buying goods ======
   const trueProfit = (d.totals.totalIn || 0) - (d.totals.spent || 0);
 
+  const photoCell = (p) => p.hasPhoto
+    ? `<img class="thumb" data-pid="${p.id}" style="display:none">`
+    : "";
+
   const productRow = (p, ownerView) => `<tr>
-    <td>${p.photo ? `<img class="thumb" src="${p.photo}">` : ""}</td>
+    <td>${photoCell(p)}</td>
     <td><b>${esc(p.name)}</b><br>
       <span class="small">added: ${p.createdAt ? dayDate(p.createdAt) : "—"} · cost: ${money(p.costPrice)}</span><br>
       <span class="small" style="color:#555">📥 ${purchaseLine(p) || "no purchase records"}</span></td>
-    <td>${p.qtyArrived}</td><td>${p.sold}</td><td><b>${p.remaining}</b></td>
+    <td>${fmtQty(p.qtyArrived)}</td><td>${fmtQty(p.sold)}</td><td><b>${fmtQty(p.remaining)}</b></td>
     <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
     ${ownerView ? `<td><button class="btn btn-gray" onclick="startEdit('${p.id}','${id}')">✏️ Edit / +Stock</button>
         <button class="btn btn-red" onclick="doDeleteProduct('${id}','${p.id}')">✕</button></td>` : ""}
   </tr>`;
 
+  const cached = getCachedPhoto(editingProduct || "");
   const editForm = (p) => `<div class="card" style="border:2px solid #1F4E79">
     <h2>✏️ Edit: ${esc(p.name)}</h2>
     <p class="small">Created on <b>${p.createdAt ? dayDate(p.createdAt) : "—"}</b> — this date never changes.</p>
     <div id="editMsg"></div>
     <label>Product name</label><input id="eName" value="${esc(p.name)}" />
-    <label>Sell price</label><input id="eSell" type="number" min="0" value="${p.sellPrice}" />
-    <label>Cost price</label><input id="eCost" type="number" min="0" value="${p.costPrice}" />
-    <label>📦 Add more stock (leave 0 if none arrived)</label>
-    <input id="eQty" type="number" min="0" value="0" />
+    <label>Sell price</label><input id="eSell" type="number" min="0" step="any" value="${p.sellPrice}" />
+    <label>Cost price</label><input id="eCost" type="number" min="0" step="any" value="${p.costPrice}" />
+    <label>📦 Add more stock — halves allowed (0 if none arrived)</label>
+    <input id="eQty" type="number" min="0" step="0.5" value="0" />
     <label>Supplier — who did you buy the new stock from?</label>
     <input id="eSupplier" placeholder="e.g. Chidi Market" />
     <label>Change photo (optional — leave empty to keep current)</label>
     <input id="ePhoto" type="file" accept="image/*" />
-    ${p.photo ? `<img class="thumb" src="${p.photo}" style="margin-top:6px">` : ""}
+    ${cached ? `<img class="thumb" src="${cached}" style="margin-top:6px">` : ""}
     <button class="btn btn-green btn-block" onclick="doEditProduct('${id}','${p.id}')">💾 Save changes</button>
     <button class="btn btn-gray btn-block" onclick="cancelEdit('${id}')">Cancel</button>
   </div>`;
@@ -225,10 +251,10 @@ async function renderStore(id, tab = "sale", msg = "") {
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
       <div class="stat-row">
-        <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD (money customers paid)</div></div>
-        <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 All-time SPENT (buying goods)</div></div>
-        <div class="stat"><div class="num" style="color:${trueProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(trueProfit)}</div><div class="lbl">✅ TRUE PROFIT (sold − spent)</div></div>
-        <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Money in stock now</div></div>
+        <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD</div></div>
+        <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 All-time SPENT</div></div>
+        <div class="stat"><div class="num" style="color:${trueProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(trueProfit)}</div><div class="lbl">✅ TRUE PROFIT</div></div>
+        <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Money in stock</div></div>
       </div>
 
       <h2>📅 Today</h2>
@@ -243,6 +269,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "sale" ? "active" : ""}" onclick="renderStore('${id}','sale')">➕ Record sale</div>
         <div class="tab ${tab === "stock" ? "active" : ""}" onclick="renderStore('${id}','stock')">📦 Stock</div>
         <div class="tab ${tab === "log" ? "active" : ""}" onclick="renderStore('${id}','log')">📋 Sales log</div>
+        ${d.isOwner ? `<div class="tab ${tab === "fixes" ? "active" : ""}" onclick="renderStore('${id}','fixes')">🛠 Corrections</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "settings" ? "active" : ""}" onclick="renderStore('${id}','settings')">⚙️ Settings</div>` : ""}
       </div>
 
@@ -254,14 +281,14 @@ async function renderStore(id, tab = "sale", msg = "") {
           <option value="">-- choose product --</option>
           ${d.products.filter((p) => p.remaining > 0).map((p) =>
             `<option value="${p.id}" data-price="${p.sellPrice}">
-              ${esc(p.name)} (${p.remaining} left)</option>`).join("")}
+              ${esc(p.name)} (${fmtQty(p.remaining)} left)</option>`).join("")}
         </select>
-        <label>Quantity sold</label>
-        <input id="saleQty" type="number" min="1" value="1" oninput="prefillAmount()" />
-        <label>Amount received (auto-fills with your set price — change it if sold higher)</label>
-        <input id="saleAmount" type="number" min="0" />
-        <button class="btn btn-green btn-block" onclick="doSale('${id}')">💾 Save sale</button>
-        <p class="small">Seller: <b>${esc(sellerName(id) || "—")}</b> (name locked from login)</p>
+        <label>Quantity sold — halves allowed (0.5, 1.5, 2...)</label>
+        <input id="saleQty" type="number" min="0.5" step="0.5" value="1" oninput="prefillAmount()" />
+        <label>Amount received (auto-fills — change if sold higher)</label>
+        <input id="saleAmount" type="number" min="0" step="any" />
+        <button class="btn btn-green btn-block" id="saleBtn" onclick="doSale('${id}')">💾 Save sale</button>
+        <p class="small">Seller: <b>${esc(sellerName(id) || "—")}</b> · Double-tap is blocked</p>
       </div></div>
 
       <div class="section ${tab === "stock" ? "active" : ""}">
@@ -276,11 +303,11 @@ async function renderStore(id, tab = "sale", msg = "") {
         <hr style="margin:16px 0">
         <h2>Add new goods (owner only)</h2>
         <div id="prodMsg"></div>
-        <label>Product name</label><input id="pName" placeholder="e.g. Total 5W-30 engine oil" />
+        <label>Product name</label><input id="pName" placeholder="e.g. Engine Oil / Ankara Wrapper" />
         <label>Photo (optional)</label><input id="pPhoto" type="file" accept="image/*" />
-        <label>Quantity arrived</label><input id="pQty" type="number" min="1" />
-        <label>Cost price — what YOU paid for one</label><input id="pCost" type="number" min="0" />
-        <label>Sell price — what the customer pays</label><input id="pSell" type="number" min="0" />
+        <label>Quantity arrived — halves allowed (e.g. 10.5 yards)</label><input id="pQty" type="number" min="0.5" step="0.5" />
+        <label>Cost price — what YOU paid for one</label><input id="pCost" type="number" min="0" step="any" />
+        <label>Sell price — what the customer pays</label><input id="pSell" type="number" min="0" step="any" />
         <label>Supplier — who did you buy from?</label><input id="pSupplier" placeholder="e.g. Chidi Market, Lagos" />
         <button class="btn btn-primary btn-block" onclick="doAddProduct('${id}')">📦 Save product</button>
       </div>` : `<div class="card"><h2>Stock</h2>
@@ -294,27 +321,44 @@ async function renderStore(id, tab = "sale", msg = "") {
       </div>
 
       <div class="section ${tab === "log" ? "active" : ""}"><div class="card">
-        <h2>Sales log (real dates & names)</h2>
+        <h2>Sales log</h2>
         ${d.sales.length === 0 ? "<p>No sales yet.</p>" : `
         <div style="overflow-x:auto"><table>
-          <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th></tr>
+          <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th>${d.isOwner ? "<th></th>" : ""}</tr>
           ${d.sales.map((s) => `<tr>
             <td class="small">${fmtDate(s.date)}</td><td>${esc(s.productName)}</td>
-            <td>${s.qty}</td><td>${money(s.amount)}</td>
+            <td>${fmtQty(s.qty)}</td><td>${money(s.amount)}</td>
             <td style="color:#2e7d32"><b>${money(s.amount - s.qty * (s.costPrice || 0))}</b></td>
             <td>${esc(s.worker || "—")}</td>
+            ${d.isOwner ? `<td><button class="btn btn-red" onclick="doDeleteSale('${id}','${s.id}')">✕</button></td>` : ""}
+          </tr>`).join("")}
+        </table></div>
+        ${d.isOwner ? `<p class="small">✕ = remove a mistaken entry (owner only — reason recorded)</p>` : ""}`}
+      </div></div>
+
+      ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
+        <h2>🛠 Corrections log (owner only)</h2>
+        ${(d.corrections || []).length === 0 ? "<p>No corrections yet. ✅</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Date & time</th><th>Action</th><th>Details</th><th>Reason</th><th>By</th></tr>
+          ${(d.corrections || []).map((c) => `<tr>
+            <td class="small">${fmtDate(c.date)}</td>
+            <td><b>${esc(c.type)}</b></td>
+            <td class="small">${esc(c.details || "")}</td>
+            <td>${esc(c.reason)}</td>
+            <td>${esc(c.by)}</td>
           </tr>`).join("")}
         </table></div>`}
-      </div></div>
+      </div></div>` : ""}
 
       ${d.isOwner ? `<div class="section ${tab === "settings" ? "active" : ""}"><div class="card">
         <h2>Store settings (owner only)</h2>
         <div id="setMsg"></div>
         <label>Store name</label><input id="setName" value="${esc(d.name)}" />
         <label>Registered name</label><input id="setReg" value="${esc(d.registeredName)}" />
-        <label>Low-stock alert level (warn when remaining is this or less)</label>
-        <input id="setLow" type="number" min="0" value="${d.lowStock}" />
-        <label>NEW store password — changes immediately and kicks out the old worker</label>
+        <label>Low-stock alert level</label>
+        <input id="setLow" type="number" min="0" step="0.5" value="${d.lowStock}" />
+        <label>NEW store password — kicks out the old worker</label>
         <input id="setPass" type="text" placeholder="leave empty to keep current password" />
         <button class="btn btn-primary btn-block" onclick="doUpdateStore('${id}')">💾 Save settings</button>
         <hr style="margin:16px 0">
@@ -323,30 +367,54 @@ async function renderStore(id, tab = "sale", msg = "") {
         <button class="btn btn-gray btn-block" onclick="doChangeOwnerPass()">Change owner password</button>
         <hr style="margin:16px 0">
         <button class="btn btn-green btn-block" onclick="doBackup()">💾 DOWNLOAD ALL MY DATA (backup)</button>
-        <p class="small">Saves everything as a file on your phone. Do this weekly!</p>
         <hr style="margin:16px 0">
         <button class="btn btn-red btn-block" onclick="doDeleteStore('${id}')">🗑️ DELETE this store</button>
       </div></div>` : ""}
     </div>`;
+
+  // photos load AFTER the screen renders — everything feels instant
+  if (d.products.some((p) => p.hasPhoto)) ensurePhotos(id, d.photosAt || 0);
 }
 
 function prefillAmount() {
   const sel = document.getElementById("saleProduct");
   const opt = sel.options[sel.selectedIndex];
   if (!opt || !opt.dataset.price) return;
-  document.getElementById("saleAmount").value =
-    Number(opt.dataset.price) * Number(document.getElementById("saleQty").value || 1);
+  const price = Number(opt.dataset.price);
+  const qty = Number(document.getElementById("saleQty").value || 1);
+  document.getElementById("saleAmount").value = Math.round(price * qty * 100) / 100;
 }
 
 async function doSale(id) {
+  if (saleSaving) return;
+  saleSaving = true;
+  const btn = document.getElementById("saleBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Saving..."; }
   try {
     await api(`/api/stores/${id}/sales`, { method: "POST", body: JSON.stringify({
       productId: val("saleProduct"),
       qty: Number(val("saleQty")),
       amount: val("saleAmount") === "" ? undefined : Number(val("saleAmount")),
       worker: sellerName(id) }) });
+    saleSaving = false;
     renderStore(id, "sale", "Sale saved ✅");
-  } catch (e) { document.getElementById("saleMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+  } catch (e) {
+    saleSaving = false;
+    if (btn) { btn.disabled = false; btn.textContent = "💾 Save sale"; }
+    document.getElementById("saleMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
+  }
+}
+
+async function doDeleteSale(storeId, saleId) {
+  const reason = prompt("Why are you removing this sale? (It will be permanently recorded)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required for the corrections log."); return; }
+  if (!confirm("Remove this sale? The quantity goes back into stock.")) return;
+  try {
+    await api(`/api/stores/${storeId}/sales/${saleId}`, { method: "DELETE",
+      body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(storeId, "log", "Sale removed ✅ Reason recorded in Corrections.");
+  } catch (e) { alert(e.message); }
 }
 
 function startEdit(pid, id) { editingProduct = pid; renderStore(id, "stock"); }
