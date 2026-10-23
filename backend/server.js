@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — BACKEND v9.2 =====
-// v9.1 + AUTO-CLEANUP: shrinks/removes legacy oversized photos on startup
+// ===== MY STORES MANAGER — BACKEND v11 =====
+// v10 (halves, owner corrections, double-tap safe) + SPEED (photos load separately)
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -33,6 +33,7 @@ async function connectMongo() {
 
 const hash = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const uid = () => crypto.randomBytes(8).toString("hex");
+const round2 = (x) => Math.round(Number(x || 0) * 100) / 100;
 
 async function loadDB() {
   await connectMongo();
@@ -42,7 +43,6 @@ async function loadDB() {
       const storeDocs = await mongoCol.find({ _id: { $regex: /^store:/ } }).toArray();
       let stores = storeDocs.map((d) => d.data);
 
-      // MIGRATION: old "main" document → per-store files (only if not already done)
       const old = await mongoCol.findOne({ _id: "main" });
       if (old && old.data && Array.isArray(old.data.stores)) {
         console.log("📦 Old-format data found — merging...");
@@ -90,7 +90,6 @@ async function saveDB() {
         const sid = d._id.replace("store:", "");
         if (!db.stores.find((s) => s.id === sid)) await mongoCol.deleteOne({ _id: d._id });
       }
-      console.log("Saved to MongoDB ✅");
     };
     try { await doSave(); }
     catch (e) {
@@ -146,8 +145,8 @@ const getStore = (id) => db.stores.find((s) => s.id === id);
 
 function withCalc(store) {
   return store.products.map((p) => {
-    const sold = store.sales.filter((s) => s.productId === p.id).reduce((a, s) => a + s.qty, 0);
-    const remaining = p.qtyArrived - sold;
+    const sold = round2(store.sales.filter((s) => s.productId === p.id).reduce((a, s) => a + Number(s.qty), 0));
+    const remaining = round2(Number(p.qtyArrived) - sold);
     const status = remaining <= 0 ? "FINISHED"
       : remaining <= (store.lowStock ?? db.lowStockDefault) ? "LOW STOCK" : "OK";
     return { ...p, createdAt: p.createdAt || p.addedAt || null, purchases: p.purchases || [], sold, remaining, status };
@@ -175,25 +174,44 @@ app.get("/api/stores", (req, res) => {
   res.json(db.stores.map((s) => ({ id: s.id, name: s.name, registeredName: s.registeredName, color: s.color })));
 });
 
+// MAIN STORE DATA — fast: photos are NOT included here (they load separately)
 app.get("/api/stores/:id", (req, res) => {
   const s = getStore(req.params.id);
   if (!s) return res.status(404).json({ error: "Store not found" });
   const isOwner = ownerTokens.has(req.headers["x-owner-token"]);
   const sid = storeTokens[req.headers["x-store-token"]];
   if (!isOwner && sid !== s.id) return res.status(401).json({ error: "Login required" });
-  const products = withCalc(s);
-  const totalIn = s.sales.reduce((a, x) => a + x.amount, 0);
+  const products = withCalc(s).map((p) => {
+    const { photo, ...rest } = p;
+    return { ...rest, hasPhoto: !!photo };
+  });
+  const totalIn = round2(s.sales.reduce((a, x) => a + x.amount, 0));
   let spent = 0;
   for (const p of s.products) for (const b of (p.purchases || [])) spent += (b.qty || 0) * (b.costPrice || 0);
+  spent = round2(spent);
   let stockValue = 0;
   for (const p of products) stockValue += Math.max(0, p.remaining) * (p.costPrice || 0);
   res.json({
     id: s.id, name: s.name, registeredName: s.registeredName, color: s.color,
     lowStock: s.lowStock ?? db.lowStockDefault,
+    photosAt: s.photosAt || 0,
     isOwner, products, sales: s.sales.slice().reverse(),
-    totals: { totalIn, spent, profit: totalIn - spent, stockValue, count: s.sales.length,
+    corrections: isOwner ? (s.corrections || []).slice().reverse() : [],
+    totals: { totalIn, spent, profit: round2(totalIn - spent), stockValue: round2(stockValue), count: s.sales.length,
       alerts: products.filter((p) => p.status !== "OK").length }
   });
+});
+
+// PHOTOS load separately (background) so the main screen is instant
+app.get("/api/stores/:id/photos", (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const isOwner = ownerTokens.has(req.headers["x-owner-token"]);
+  const sid = storeTokens[req.headers["x-store-token"]];
+  if (!isOwner && sid !== s.id) return res.status(401).json({ error: "Login required" });
+  const photos = {};
+  for (const p of s.products) if (p.photo) photos[p.id] = p.photo;
+  res.json({ photosAt: s.photosAt || 0, photos });
 });
 
 app.post("/api/stores", ownerAuth, async (req, res) => {
@@ -202,7 +220,7 @@ app.post("/api/stores", ownerAuth, async (req, res) => {
   const s = {
     id: uid(), name, registeredName: registeredName || "",
     password: hash(password), color: color || "#1F4E79",
-    lowStock: db.lowStockDefault, products: [], sales: []
+    lowStock: db.lowStockDefault, products: [], sales: [], corrections: [], photosAt: 0
   };
   db.stores.push(s);
   await saveDB();
@@ -252,14 +270,15 @@ app.post("/api/stores/:id/products", ownerOnly, async (req, res) => {
   const now = new Date().toISOString();
   const p = {
     id: uid(), name, photo: photo || "",
-    qtyArrived: Number(qtyArrived),
+    qtyArrived: round2(qtyArrived),
     costPrice: Number(costPrice) || 0,
     sellPrice: Number(sellPrice) || 0,
     createdAt: now,
-    purchases: [{ id: uid(), qty: Number(qtyArrived), costPrice: Number(costPrice) || 0,
+    purchases: [{ id: uid(), qty: round2(qtyArrived), costPrice: Number(costPrice) || 0,
       supplier: (supplier || "").trim(), date: now }]
   };
   req.store.products.push(p);
+  req.store.photosAt = Date.now();
   await saveDB();
   res.json({ id: p.id });
 });
@@ -277,6 +296,7 @@ app.put("/api/stores/:id/products/:pid", ownerOnly, async (req, res) => {
       return res.status(400).json({ error: "This photo format is too large or unsupported. Please use a normal JPG/PNG photo." });
     }
     p.photo = shrunk;
+    req.store.photosAt = Date.now();
   }
   await saveDB();
   res.json({ ok: true });
@@ -285,9 +305,9 @@ app.put("/api/stores/:id/products/:pid", ownerOnly, async (req, res) => {
 app.post("/api/stores/:id/products/:pid/restock", ownerOnly, async (req, res) => {
   const p = req.store.products.find((x) => x.id === req.params.pid);
   if (!p) return res.status(404).json({ error: "Product not found" });
-  const qty = Number(req.body.qty);
+  const qty = round2(req.body.qty);
   if (!(qty > 0)) return res.status(400).json({ error: "Quantity required" });
-  p.qtyArrived += qty;
+  p.qtyArrived = round2(Number(p.qtyArrived) + qty);
   if (req.body.costPrice) p.costPrice = Number(req.body.costPrice);
   if (req.body.sellPrice) p.sellPrice = Number(req.body.sellPrice);
   p.purchases = p.purchases || [];
@@ -305,25 +325,29 @@ app.delete("/api/stores/:id/products/:pid", ownerAuth, async (req, res) => {
   const s = getStore(req.params.id);
   s.products = s.products.filter((p) => p.id !== req.params.pid);
   s.sales = s.sales.filter((x) => x.productId !== req.params.pid);
+  s.photosAt = Date.now();
   await saveDB();
   res.json({ ok: true });
 });
 
+// ---------- SALES ----------
 app.post("/api/stores/:id/sales", storeAuth, async (req, res) => {
-  const { productId, qty, amount, worker } = req.body;
+  const { productId, amount, worker } = req.body;
+  const qty = round2(req.body.qty);
   if (!worker || !String(worker).trim()) {
     return res.status(400).json({ error: "Worker name is required. Enter your name when opening the store." });
   }
   const p = req.store.products.find((x) => x.id === productId);
   if (!p) return res.status(404).json({ error: "Product not found" });
   if (!(qty > 0)) return res.status(400).json({ error: "Quantity required" });
-  const remaining = p.qtyArrived - req.store.sales
-    .filter((s) => s.productId === p.id).reduce((a, s) => a + s.qty, 0);
+  const remaining = round2(Number(p.qtyArrived) - req.store.sales
+    .filter((s) => s.productId === p.id).reduce((a, s) => a + Number(s.qty), 0));
   if (qty > remaining) return res.status(400).json({ error: `Only ${remaining} left in stock` });
-  const amt = amount !== undefined && amount !== "" ? Number(amount) : p.sellPrice * qty;
+  const amt = amount !== undefined && amount !== "" ? Number(amount) : round2(p.sellPrice * qty);
   const sale = {
     id: uid(), productId: p.id, productName: p.name,
-    qty: Number(qty), amount: amt, costPrice: p.costPrice,
+    qty, amount: amt, costPrice: p.costPrice,
+    profit: round2(amt - qty * p.costPrice),
     worker: String(worker).trim(),
     date: new Date().toISOString()
   };
@@ -332,26 +356,44 @@ app.post("/api/stores/:id/sales", storeAuth, async (req, res) => {
   res.json({ id: sale.id });
 });
 
-app.get("/", (req, res) => res.send("My Stores API is running ✅ — per-store permanent storage in MongoDB"));
+// OWNER ONLY: remove mistaken sale, reason recorded
+app.delete("/api/stores/:id/sales/:sid", ownerAuth, async (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const sale = s.sales.find((x) => x.id === req.params.sid);
+  if (!sale) return res.status(404).json({ error: "Sale not found" });
+  const reason = String(req.body.reason || "").trim();
+  if (!reason) return res.status(400).json({ error: "A reason is required (for the corrections log)." });
+  s.corrections = s.corrections || [];
+  s.corrections.push({
+    id: uid(), type: "SALE REMOVED", date: new Date().toISOString(), by: "OWNER", reason,
+    details: sale.qty + " x " + sale.productName + " — " + sale.amount +
+      " (recorded " + sale.date + " by " + (sale.worker || "—") + ")"
+  });
+  s.sales = s.sales.filter((x) => x.id !== req.params.sid);
+  await saveDB();
+  res.json({ ok: true });
+});
+
+app.get("/", (req, res) => res.send("My Stores API is running ✅ — fast mode: photos load separately"));
 
 // ---------- START + legacy photo cleanup ----------
 let db;
 loadDB().then(async (loaded) => {
   db = loaded;
-  // one-time cleanup of OLD oversized photos (added before auto-compression existed)
-  let cleaned = 0, removed = 0;
+  let fixed = 0;
   for (const s of db.stores) {
+    let touched = false;
     for (const p of s.products || []) {
       if (p.photo && p.photo.length > 120 * 1024) {
         const shrunk = await shrinkPhoto(p.photo);
-        if (shrunk && shrunk.length <= 120 * 1024) { p.photo = shrunk; cleaned++; }
-        else { p.photo = ""; removed++; } // could not be saved safely — drop it
+        if (shrunk && shrunk.length <= 120 * 1024) { p.photo = shrunk; }
+        else { p.photo = ""; }
+        touched = true; fixed++;
       }
     }
+    if (touched) s.photosAt = Date.now();
   }
-  if (cleaned || removed) {
-    console.log("🖼️ Old photos fixed: " + cleaned + " shrunk, " + removed + " removed (re-add them from your phone if needed)");
-    await saveDB();
-  }
+  if (fixed) { console.log("🖼️ Old oversized photos fixed: " + fixed); await saveDB(); }
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 });
