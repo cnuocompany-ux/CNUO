@@ -8,6 +8,7 @@ let selectedColor = "#1F4E79";
 let editingProduct = null;
 let saleSaving = false;
 const photoCache = {};
+let salePicker = { products: [], selected: null };
 const VOICE_SUPPORTED = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 
 const app = document.getElementById("app");
@@ -153,10 +154,8 @@ function voiceSale() {
   r.onerror = (e) => { if (status) status.textContent = "🎤 Error: " + e.error + " — allow microphone permission"; };
   r.onend = () => {
     if (!finalText.trim()) return;
-    const sel = document.getElementById("saleProduct");
-    const prods = [...sel.options].slice(1).map((o) => ({ id: o.value, name: o.textContent.split(" (")[0] }));
-    const parsed = parseSpokenSale(finalText, prods);
-    if (parsed.product) sel.value = parsed.product.id;
+    const parsed = parseSpokenSale(finalText, salePicker.products);
+    if (parsed.product) pickProduct(parsed.product.id);
     if (parsed.qty !== null) document.getElementById("saleQty").value = parsed.qty;
     if (parsed.amount !== null) document.getElementById("saleAmount").value = parsed.amount;
     else prefillAmount();
@@ -395,13 +394,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <button class="btn btn-gray btn-block" onclick="voiceSale()">🎤 SPEAK YOUR SALE — no typing needed</button>
         <div id="voiceStatus" class="small" style="margin:6px 0;color:#1F4E79;font-weight:600">Tap the mic, then say e.g. "Sold 2 and a half yards of Ankara for nine thousand naira"</div>
         <hr style="margin:12px 0">` : `<p class="small">🎤 Voice input needs Chrome browser</p>`}
-        <label>Product</label>
-        <select id="saleProduct" onchange="prefillAmount()">
-          <option value="">-- choose product --</option>
-          ${d.products.filter((p) => p.remaining > 0).map((p) =>
-            `<option value="${p.id}" data-price="${p.sellPrice}">
-              ${esc(p.name)} (${fmtQty(p.remaining)} left)</option>`).join("")}
-        </select>
+        <label>Product — type ANY part of the name to search (no scrolling)</label>
+        <div id="pickerBox"></div>
         <label>Quantity sold — halves allowed (0.5, 1.5, 2...)</label>
         <input id="saleQty" type="number" min="0.5" step="0.5" value="1" oninput="prefillAmount()" />
         <label>Amount received (auto-fills — change if sold higher)</label>
@@ -495,16 +489,57 @@ async function renderStore(id, tab = "sale", msg = "") {
       </div></div>` : ""}
     </div>`;
 
+  renderSalePicker(d.products);
   if (d.products.some((p) => p.hasPhoto)) ensurePhotos(id, d.photosAt || 0);
 }
 
+// ---------- searchable product picker ----------
+function renderSalePicker(products) {
+  const box = document.getElementById("pickerBox");
+  if (!box) return;
+  salePicker.products = products.filter((p) => p.remaining > 0);
+  salePicker.selected = null;
+  box.innerHTML = `
+    <input id="saleSearch" placeholder="type to search... e.g. 'ankara' or 'oil'" oninput="filterSalePicker()" autocomplete="off" style="margin-bottom:4px" />
+    <div id="pickerResults" style="border:1px solid #ddd;border-radius:8px;max-height:200px;overflow-y:auto"></div>
+    <div id="pickerSelected" style="display:none;margin-top:6px;padding:10px;background:#c8e6c9;border-radius:8px;font-weight:700"></div>
+    <input type="hidden" id="saleProduct" />`;
+  filterSalePicker();
+}
+function filterSalePicker() {
+  const q = (val("saleSearch") || "").toLowerCase().trim();
+  const list = salePicker.products.filter((p) => !q || p.name.toLowerCase().includes(q));
+  const box = document.getElementById("pickerResults");
+  if (!box) return;
+  if (!list.length) {
+    box.innerHTML = `<div class="small" style="padding:10px;color:#777">No match for that spelling — owner can add it in Stock.</div>`;
+    return;
+  }
+  box.innerHTML = list.map((p) => `
+    <div onclick="pickProduct('${p.id}')" style="padding:11px;border-bottom:1px solid #eee;cursor:pointer">
+      <b>${esc(p.name)}</b> <span class="small">&mdash; ${fmtQty(p.remaining)} left @ ${money(p.sellPrice)}</span>
+    </div>`).join("");
+}
+function pickProduct(pid) {
+  const p = salePicker.products.find((x) => x.id === pid);
+  if (!p) return;
+  salePicker.selected = p;
+  const hid = document.getElementById("saleProduct");
+  if (hid) hid.value = p.id;
+  const sel = document.getElementById("pickerSelected");
+  if (sel) { sel.style.display = "block"; sel.textContent = "Selected: " + p.name + " \u2014 " + fmtQty(p.remaining) + " left @ " + money(p.sellPrice); }
+  const res = document.getElementById("pickerResults");
+  if (res) res.innerHTML = "";
+  prefillAmount();
+}
+
 function prefillAmount() {
-  const sel = document.getElementById("saleProduct");
-  const opt = sel.options[sel.selectedIndex];
-  if (!opt || !opt.dataset.price) return;
-  const price = Number(opt.dataset.price);
-  const qty = Number(document.getElementById("saleQty").value || 1);
-  document.getElementById("saleAmount").value = Math.round(price * qty * 100) / 100;
+  const p = salePicker.selected;
+  if (!p) return;
+  const qtyEl = document.getElementById("saleQty");
+  const qty = Number((qtyEl && qtyEl.value) || 1);
+  const amtEl = document.getElementById("saleAmount");
+  if (amtEl) amtEl.value = Math.round(p.sellPrice * qty * 100) / 100;
 }
 
 async function doSale(id) {
