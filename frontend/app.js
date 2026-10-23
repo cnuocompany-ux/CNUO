@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — FRONTEND v11 =====
-// v10 (halves, owner corrections, double-tap block) + SPEED: photos load in background
+// ===== MY STORES MANAGER — FRONTEND v12 =====
+// v11 (speed, halves, corrections) + VOICE INPUT + SMART SUGGESTIONS
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
@@ -7,7 +7,8 @@ let storeId = localStorage.getItem("storeId") || "";
 let selectedColor = "#1F4E79";
 let editingProduct = null;
 let saleSaving = false;
-const photoCache = {}; // storeId -> { at, photos } — photos never block the screen
+const photoCache = {};
+const VOICE_SUPPORTED = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 
 const app = document.getElementById("app");
 const money = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -37,7 +38,7 @@ async function api(path, opts = {}) {
   return data;
 }
 
-// ---------- photos: load in background, never block the screen ----------
+// ---------- PHOTOS: load in background ----------
 async function ensurePhotos(id, photosAt) {
   if (photoCache[id] && photoCache[id].at === photosAt) { applyPhotos(id); return; }
   try {
@@ -57,6 +58,111 @@ function applyPhotos(id) {
 function getCachedPhoto(pid) {
   for (const k in photoCache) { if (photoCache[k].photos && photoCache[k].photos[pid]) return photoCache[k].photos[pid]; }
   return "";
+}
+
+// ================= VOICE + SPEECH PARSING =================
+const NUMWORDS = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
+  ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
+  seventeen:17, eighteen:18, nineteen:19, twenty:20, thirty:30, forty:40, fifty:50,
+  sixty:60, seventy:70, eighty:80, ninety:90, half:0.5 };
+const NUMRE = "(?:\\d+(?:\\.\\d+)?|" + Object.keys(NUMWORDS).join("|") + ")";
+
+function spokenNumber(str) {
+  const tokens = String(str).toLowerCase().trim().split(/\s+/).filter((t) => t && t !== "and" && t !== "a" && t !== "an");
+  let total = 0, cur = 0, has = false;
+  for (const t of tokens) {
+    if (t === "thousand") { cur = (cur || 1) * 1000; total += cur; cur = 0; has = true; }
+    else if (t === "hundred") { cur = (cur || 1) * 100; has = true; }
+    else if (NUMWORDS[t] !== undefined) { cur += NUMWORDS[t]; has = true; }
+    else if (/^\d+(\.\d+)?$/.test(t)) { cur += parseFloat(t); has = true; }
+  }
+  return has ? total + cur : null;
+}
+
+// Parse "sold 2 and a half yards of ankara for nine thousand naira"
+function parseSpokenSale(text, products) {
+  const lower = " " + text.toLowerCase().replace(/[?!.,]/g, " ") + " ";
+  const units = "(yards?|yds?|litres?|liters?|pieces?|pcs?|packs?|bottles?|wraps?|rolls?|meters?|metres?)";
+  let qty = null;
+  const qm = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?)\\s*" + units));
+  if (qm) qty = spokenNumber(qm[1]);
+  if (qty === null) {
+    const anyNum = lower.match(/(\d+(?:\.\d+)?)/);
+    if (anyNum) qty = parseFloat(anyNum[1]);
+  }
+  let amount = null;
+  const amountM = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMRE + ")*)\\s*(?:naira|ngn|₦)"));
+  if (amountM) amount = spokenNumber(amountM[1]);
+  if (amount === null) {
+    const forM = lower.match(/(?:for|at|price)\s+([a-z0-9\s]+?)(?:\s+naira)?$/);
+    if (forM) amount = spokenNumber(forM[1]);
+  }
+  let best = null, bestScore = 0;
+  for (const p of products) {
+    const words = String(p.name).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    let score = 0;
+    for (const w of words) { if (lower.includes(w)) score++; }
+    if (score > bestScore) { bestScore = score; best = p; }
+  }
+  return { qty, amount, product: best, heard: text.trim() };
+}
+
+// Generic voice -> text field
+function voiceFill(inputId, statusId) {
+  if (!VOICE_SUPPORTED) { alert("Voice input is not supported in this browser. Please use Chrome."); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const r = new SR();
+  r.lang = "en-NG"; r.interimResults = true; r.maxAlternatives = 1;
+  const status = document.getElementById(statusId);
+  if (status) status.textContent = "🎤 Listening... speak now";
+  let finalText = "";
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    if (status) status.textContent = "🎤 " + (finalText || interim);
+    if (finalText) {
+      const inp = document.getElementById(inputId);
+      if (inp) inp.value = finalText.trim();
+      if (status) status.textContent = "✅ " + finalText.trim();
+    }
+  };
+  r.onerror = (e) => { if (status) status.textContent = "🎤 Error: " + e.error + " — allow microphone permission"; };
+  r.start();
+}
+
+// Voice sale: speak what was sold -> fill the form -> staff confirms
+function voiceSale() {
+  if (!VOICE_SUPPORTED) { alert("Voice input is not supported in this browser. Please use Chrome."); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const r = new SR();
+  r.lang = "en-NG"; r.interimResults = true; r.maxAlternatives = 1;
+  const status = document.getElementById("voiceStatus");
+  if (status) status.textContent = "🎤 Listening... e.g. 'Sold 2 and a half yards of Ankara for nine thousand naira'";
+  let finalText = "";
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    if (status) status.textContent = "🎤 " + (finalText || interim);
+  };
+  r.onerror = (e) => { if (status) status.textContent = "🎤 Error: " + e.error + " — allow microphone permission"; };
+  r.onend = () => {
+    if (!finalText.trim()) return;
+    const sel = document.getElementById("saleProduct");
+    const prods = [...sel.options].slice(1).map((o) => ({ id: o.value, name: o.textContent.split(" (")[0] }));
+    const parsed = parseSpokenSale(finalText, prods);
+    if (parsed.product) sel.value = parsed.product.id;
+    if (parsed.qty !== null) document.getElementById("saleQty").value = parsed.qty;
+    if (parsed.amount !== null) document.getElementById("saleAmount").value = parsed.amount;
+    else prefillAmount();
+    if (status) status.textContent = `🎤 Heard: "${finalText.trim()}" — CHECK the details above, then tap Save sale`;
+  };
+  r.start();
 }
 
 // ================= SETUP =================
@@ -169,6 +275,8 @@ async function openStore(id, name) {
       <div id="slMsg"></div>
       <label>Your name (REQUIRED — who is selling today)</label>
       <input id="slName" placeholder="e.g. Ada" value="${esc(sellerName(id))}" />
+      <button class="btn btn-gray btn-block" onclick="voiceFill('slName','slVoiceStatus')">🎤 Speak your name</button>
+      <div id="slVoiceStatus" class="small"></div>
       <label>Password</label><input id="slPass" type="password" />
       <button class="btn btn-primary btn-block" onclick="doStoreLogin('${id}')">Open store & start selling</button>
     </div></div>`;
@@ -177,7 +285,7 @@ async function doStoreLogin(id) {
   const nm = val("slName").trim();
   if (!nm) {
     document.getElementById("slMsg").innerHTML =
-      `<div class="msg msg-error">⚠️ Type your name first. It is required.</div>`;
+      `<div class="msg msg-error">⚠️ Type or speak your name first. It is required.</div>`;
     return;
   }
   try {
@@ -207,6 +315,12 @@ async function renderStore(id, tab = "sale", msg = "") {
   const tProfit = tSales.reduce((a, s) => a + (s.amount - s.qty * (s.costPrice || 0)), 0);
   const trueProfit = (d.totals.totalIn || 0) - (d.totals.spent || 0);
 
+  // ---- smart suggestions data ----
+  const productNames = [...new Set(d.products.map((p) => p.name))];
+  const supplierNames = [...new Set(d.products.flatMap((p) => (p.purchases || []).map((b) => b.supplier)).filter(Boolean))];
+  const dlProducts = `<datalist id="dl-products">${productNames.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>`;
+  const dlSuppliers = `<datalist id="dl-suppliers">${supplierNames.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>`;
+
   const photoCell = (p) => p.hasPhoto
     ? `<img class="thumb" data-pid="${p.id}" style="display:none">`
     : "";
@@ -227,13 +341,13 @@ async function renderStore(id, tab = "sale", msg = "") {
     <h2>✏️ Edit: ${esc(p.name)}</h2>
     <p class="small">Created on <b>${p.createdAt ? dayDate(p.createdAt) : "—"}</b> — this date never changes.</p>
     <div id="editMsg"></div>
-    <label>Product name</label><input id="eName" value="${esc(p.name)}" />
+    <label>Product name</label><input id="eName" list="dl-products" value="${esc(p.name)}" />
     <label>Sell price</label><input id="eSell" type="number" min="0" step="any" value="${p.sellPrice}" />
     <label>Cost price</label><input id="eCost" type="number" min="0" step="any" value="${p.costPrice}" />
     <label>📦 Add more stock — halves allowed (0 if none arrived)</label>
     <input id="eQty" type="number" min="0" step="0.5" value="0" />
     <label>Supplier — who did you buy the new stock from?</label>
-    <input id="eSupplier" placeholder="e.g. Chidi Market" />
+    <input id="eSupplier" list="dl-suppliers" placeholder="e.g. Chidi Market" />
     <label>Change photo (optional — leave empty to keep current)</label>
     <input id="ePhoto" type="file" accept="image/*" />
     ${cached ? `<img class="thumb" src="${cached}" style="margin-top:6px">` : ""}
@@ -245,6 +359,7 @@ async function renderStore(id, tab = "sale", msg = "") {
       <h1>🏪 ${esc(d.name)}</h1>
       <button class="btn btn-gray" onclick="clearStoreLogin(); renderHome()">← All stores</button></div>
     <div class="container">
+      ${dlProducts}${dlSuppliers}
       ${msg ? `<div class="msg msg-ok">${esc(msg)}</div>` : ""}
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
@@ -276,6 +391,10 @@ async function renderStore(id, tab = "sale", msg = "") {
       <div class="section ${tab === "sale" ? "active" : ""}"><div class="card">
         <h2>Record a sale</h2>
         <div id="saleMsg"></div>
+        ${VOICE_SUPPORTED ? `
+        <button class="btn btn-gray btn-block" onclick="voiceSale()">🎤 SPEAK YOUR SALE — no typing needed</button>
+        <div id="voiceStatus" class="small" style="margin:6px 0;color:#1F4E79;font-weight:600">Tap the mic, then say e.g. "Sold 2 and a half yards of Ankara for nine thousand naira"</div>
+        <hr style="margin:12px 0">` : `<p class="small">🎤 Voice input needs Chrome browser</p>`}
         <label>Product</label>
         <select id="saleProduct" onchange="prefillAmount()">
           <option value="">-- choose product --</option>
@@ -303,12 +422,16 @@ async function renderStore(id, tab = "sale", msg = "") {
         <hr style="margin:16px 0">
         <h2>Add new goods (owner only)</h2>
         <div id="prodMsg"></div>
-        <label>Product name</label><input id="pName" placeholder="e.g. Engine Oil / Ankara Wrapper" />
+        <label>Product name — typing shows suggestions</label><input id="pName" list="dl-products" placeholder="e.g. Engine Oil / Ankara Wrapper" />
+        <button class="btn btn-gray btn-block" onclick="voiceFill('pName','prodVoiceStatus')">🎤 Speak product name</button>
+        <div id="prodVoiceStatus" class="small"></div>
         <label>Photo (optional)</label><input id="pPhoto" type="file" accept="image/*" />
         <label>Quantity arrived — halves allowed (e.g. 10.5 yards)</label><input id="pQty" type="number" min="0.5" step="0.5" />
         <label>Cost price — what YOU paid for one</label><input id="pCost" type="number" min="0" step="any" />
         <label>Sell price — what the customer pays</label><input id="pSell" type="number" min="0" step="any" />
-        <label>Supplier — who did you buy from?</label><input id="pSupplier" placeholder="e.g. Chidi Market, Lagos" />
+        <label>Supplier — typing shows past suppliers</label><input id="pSupplier" list="dl-suppliers" placeholder="e.g. Chidi Market, Lagos" />
+        <button class="btn btn-gray btn-block" onclick="voiceFill('pSupplier','supVoiceStatus')">🎤 Speak supplier name</button>
+        <div id="supVoiceStatus" class="small"></div>
         <button class="btn btn-primary btn-block" onclick="doAddProduct('${id}')">📦 Save product</button>
       </div>` : `<div class="card"><h2>Stock</h2>
         <p>👀 View only — only the owner can add goods.</p>
@@ -372,7 +495,6 @@ async function renderStore(id, tab = "sale", msg = "") {
       </div></div>` : ""}
     </div>`;
 
-  // photos load AFTER the screen renders — everything feels instant
   if (d.products.some((p) => p.hasPhoto)) ensurePhotos(id, d.photosAt || 0);
 }
 
