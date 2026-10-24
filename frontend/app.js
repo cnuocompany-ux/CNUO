@@ -1,4 +1,5 @@
-// ===== MY STORES MANAGER — FRONTEND v19 =====
+// ===== MY STORES MANAGER — FRONTEND v21 =====
+// v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
@@ -8,6 +9,51 @@ let selectedColor = "#1F4E79";
 let editingProduct = null;
 let saleSaving = false;
 const photoCache = {};
+// ---------- OFFLINE OUTBOX: save on phone when no network, auto-send later ----------
+let outbox = [];
+try { outbox = JSON.parse(localStorage.getItem("cnuo_outbox") || "[]"); } catch (e) { outbox = []; }
+let outboxSyncing = false;
+function saveOutbox() { try { localStorage.setItem("cnuo_outbox", JSON.stringify(outbox)); } catch (e) {} }
+function isNetError(e) { return !navigator.onLine || /failed to fetch|network|timeout|unreachable/i.test(String(e && e.message)); }
+async function submitWrite(path, method, payload) {
+  try { await api(path, { method, body: JSON.stringify(payload) }); return { ok: true }; }
+  catch (e) {
+    if (isNetError(e)) { outbox.push({ path, method, payload, at: Date.now() }); saveOutbox(); return { queued: true }; }
+    throw e;
+  }
+}
+async function syncOutbox() {
+  if (outboxSyncing || !outbox.length || !navigator.onLine) return;
+  outboxSyncing = true;
+  let sent = 0, dropped = 0;
+  while (outbox.length && navigator.onLine) {
+    const item = outbox[0];
+    try { await api(item.path, { method: item.method, body: JSON.stringify(item.payload) }); outbox.shift(); sent++; }
+    catch (e) {
+      if (isNetError(e)) break;             // still offline — retry later
+      outbox.shift(); dropped++;            // server rejected it (e.g. not enough stock left)
+    }
+  }
+  outboxSyncing = false;
+  saveOutbox();
+  updateOutboxBadge();
+  if (sent > 0 || dropped > 0) {
+    const msg = (sent ? sent + " queued item(s) sent ✅" : "") + (dropped ? " " + dropped + " could not be sent (stock changed) — please check" : "");
+    if (storeId) { try { renderStore(storeId, undefined, msg.trim()); } catch (e) {} }
+    else if (sent > 0) alert("📶 " + msg.trim());
+  }
+}
+function updateOutboxBadge() {
+  document.querySelectorAll("[data-outbox-badge]").forEach((el) => {
+    el.style.display = outbox.length ? "" : "none";
+    el.textContent = "📶 " + outbox.length + " queued";
+  });
+}
+window.addEventListener("online", () => syncOutbox());
+setInterval(() => { if (outbox.length) syncOutbox(); }, 30000);
+// store view cache for offline viewing
+const storeCache = {};
+try { for (const k in localStorage) { if (k.indexOf("cnuo_cache_") === 0) { try { storeCache[k.replace("cnuo_cache_", "")] = JSON.parse(localStorage[k]); } catch (e) {} } } } catch (e) {}
 let salePicker = { products: [], selected: null };
 const VOICE_SUPPORTED = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 let assistantActive = false;
@@ -230,12 +276,12 @@ async function voiceAssistant(storeId) {
   }
   if (/\b(yes|correct|okay|ok|sure|exactly|right|confirm|that's right)\b/.test(conf)) {
     try {
-      await api("/api/stores/" + storeId + "/sales", { method: "POST", body: JSON.stringify({
+      const vr = await submitWrite("/api/stores/" + storeId + "/sales", "POST", {
         productId: val("saleProduct"),
         qty: Number(val("saleQty")),
         amount: val("saleAmount") === "" ? undefined : Number(val("saleAmount")),
-        worker: name }) });
-      speak("Sale saved! Thank you, " + name + ". Goodbye.");
+        worker: name });
+      speak(vr.queued ? "No network. I saved it on this phone. It will send when network returns." : "Sale saved! Thank you, " + name + ". Goodbye.");
       const status = document.getElementById("voiceStatus");
       if (status) status.innerHTML = '<div class="msg msg-ok">\u2705 Sale saved by ' + ASSISTANT_NAME + ': ' + esc(describeCurrentSale()) + '</div>';
       assistantActive = false;
@@ -456,6 +502,7 @@ async function renderHome(msg = "") {
   try { stores = await api("/api/stores"); } catch (e) {}
   app.innerHTML = `<div class="topbar">
       <h1>🏪 My Stores</h1>
+      <span data-outbox-badge class="badge badge-low" style="display:${outbox.length ? "" : "none"}">📶 ${outbox.length} queued</span>
       <div>
         ${ownerToken ? `<button class="btn btn-green" onclick="showAddStore()">+ Add Store</button>
         <button class="btn btn-gray" onclick="logoutOwner()">Owner logout</button>`
@@ -563,9 +610,16 @@ function clearStoreLogin() { storeToken = ""; storeId = "";
   localStorage.removeItem("storeToken"); localStorage.removeItem("storeId"); }
 
 async function renderStore(id, tab = "sale", msg = "") {
-  let d;
-  try { d = await api(`/api/stores/${id}`); }
-  catch (e) { clearStoreLogin(); return openStore(id, "this store"); }
+  let d, offline = false;
+  try {
+    d = await api(`/api/stores/${id}`);
+    storeCache[id] = d;
+    try { localStorage.setItem("cnuo_cache_" + id, JSON.stringify(d)); } catch (e) {}
+    setTimeout(syncOutbox, 300);
+  } catch (e) {
+    if (!navigator.onLine && storeCache[id]) { d = storeCache[id]; offline = true; }
+    else { clearStoreLogin(); return openStore(id, "this store"); }
+  }
   if (editingProduct && !d.products.find((p) => p.id === editingProduct)) editingProduct = null;
 
   const badge = (s) => s === "FINISHED" ? `<span class="badge badge-fin">FINISHED</span>`
@@ -583,6 +637,8 @@ async function renderStore(id, tab = "sale", msg = "") {
   const supplierNames = [...new Set(d.products.flatMap((p) => (p.purchases || []).map((b) => b.supplier)).filter(Boolean))];
   const dlProducts = `<datalist id="dl-products">${productNames.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>`;
   const dlSuppliers = `<datalist id="dl-suppliers">${supplierNames.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>`;
+  const debtCustomers = [...new Set([...(d.debts || []).map((x) => x.customer), ...((d.debtsPaid) || []).map((x) => x.customer)])];
+  const dlCustomers = `<datalist id="dl-customers">${debtCustomers.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>`;
 
   const photoCell = (p) => p.hasPhoto
     ? `<img class="thumb" data-pid="${p.id}" style="display:none">`
@@ -622,17 +678,25 @@ async function renderStore(id, tab = "sale", msg = "") {
       <h1>🏪 ${esc(d.name)}</h1>
       <button class="btn btn-gray" onclick="clearStoreLogin(); renderHome()">← All stores</button></div>
     <div class="container">
-      ${dlProducts}${dlSuppliers}
+      ${dlProducts}${dlSuppliers}${dlCustomers}
       ${msg ? `<div class="msg msg-ok">${esc(msg)}</div>` : ""}
+      ${offline ? `<div class="msg msg-error">📶 OFFLINE — showing last saved data. Sales will queue on this phone.</div>` : ""}
+      <span data-outbox-badge class="badge badge-low" style="display:${outbox.length ? "" : "none"}">📶 ${outbox.length} queued</span>
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
       <div class="stat-row">
         <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD</div></div>
-        <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 All-time SPENT</div></div>
-        <div class="stat"><div class="num" style="color:${trueProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(trueProfit)}</div><div class="lbl">✅ TRUE PROFIT</div></div>
+        <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 SPENT on goods</div></div>
+        <div class="stat"><div class="num">${money(d.expensesTotal || 0)}</div><div class="lbl">💸 EXPENSES</div></div>
+        <div class="stat"><div class="num">${money(d.owedTotal || 0)}</div><div class="lbl">🧾 OWED to you</div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat"><div class="num" style="color:${(d.totals.profit || 0) >= 0 ? "#2e7d32" : "#c62828"}">${money(d.totals.profit)}</div><div class="lbl">✅ NET PROFIT (after expenses)</div></div>
         <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Money in stock</div></div>
+        <div class="stat"><div class="num">${d.totals.count}</div><div class="lbl">All-time sales</div></div>
+        <div class="stat"><div class="num">${(d.debts || []).length}</div><div class="lbl">Unpaid debts</div></div>
       </div>
 
       <h2>📅 Today</h2>
@@ -640,13 +704,15 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="stat"><div class="num">${money(tMoney)}</div><div class="lbl">Today's money</div></div>
         <div class="stat"><div class="num">${money(tProfit)}</div><div class="lbl">Today's profit</div></div>
         <div class="stat"><div class="num">${tSales.length}</div><div class="lbl">Today's sales</div></div>
-        <div class="stat"><div class="num">${d.totals.count}</div><div class="lbl">All-time sales</div></div>
       </div>
 
       <div class="tabs">
         <div class="tab ${tab === "sale" ? "active" : ""}" onclick="renderStore('${id}','sale')">➕ Record sale</div>
         <div class="tab ${tab === "stock" ? "active" : ""}" onclick="renderStore('${id}','stock')">📦 Stock</div>
         <div class="tab ${tab === "log" ? "active" : ""}" onclick="renderStore('${id}','log')">📋 Sales log</div>
+        <div class="tab ${tab === "debts" ? "active" : ""}" onclick="renderStore('${id}','debts')">🧾 Debts</div>
+        <div class="tab ${tab === "close" ? "active" : ""}" onclick="renderStore('${id}','close')">🔒 Close day</div>
+        ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "fixes" ? "active" : ""}" onclick="renderStore('${id}','fixes')">🛠 Corrections</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "settings" ? "active" : ""}" onclick="renderStore('${id}','settings')">⚙️ Settings</div>` : ""}
       </div>
@@ -717,6 +783,74 @@ async function renderStore(id, tab = "sale", msg = "") {
         ${d.isOwner ? `<p class="small">✕ = remove a mistaken entry (owner only — reason recorded)</p>` : ""}`}
       </div></div>
 
+      <div class="section ${tab === "debts" ? "active" : ""}"><div class="card">
+        <h2>🧾 Debt Book (sell now, pay later)</h2>
+        <div class="stat" style="margin-bottom:8px"><div class="num">${money(d.owedTotal || 0)}</div><div class="lbl">Total owed to you</div></div>
+        <div id="debtMsg"></div>
+        <label>Customer name</label><input id="dbCustomer" list="dl-customers" placeholder="Who is taking the goods?" />
+        <label>Amount (naira)</label><input id="dbAmount" type="number" min="1" step="any" />
+        <label>Note - what did they take? (optional)</label><input id="dbNote" placeholder="e.g. 2 yards ankara" />
+        <button class="btn btn-primary btn-block" onclick="doAddDebt('${id}')">🧾 Record debt</button>
+        <hr style="margin:14px 0">
+        ${(d.debts || []).length === 0 ? "<p>No unpaid debts. ✅</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Customer</th><th>Amount</th><th>Note</th><th>Date</th><th>By</th><th></th></tr>
+          ${d.debts.map((x) => `<tr>
+            <td><b>${esc(x.customer)}</b></td><td>${money(x.amount)}</td>
+            <td class="small">${esc(x.note || "—")}</td>
+            <td class="small">${fmtDate(x.date)}</td><td>${esc(x.worker || "—")}</td>
+            <td><button class="btn btn-green" onclick="doPayDebt('${id}','${x.id}')">✅ Paid</button>
+            ${d.isOwner ? `<button class="btn btn-red" onclick="doDeleteDebt('${id}','${x.id}')">✕</button>` : ""}</td>
+          </tr>`).join("")}
+        </table></div>`}
+        ${d.isOwner && (d.debtsPaid || []).length ? `<hr style="margin:14px 0"><p class="small"><b>Paid debts (recent):</b></p>
+        <div style="overflow-x:auto"><table>
+          <tr><th>Customer</th><th>Amount</th><th>Paid on</th><th></th></tr>
+          ${d.debtsPaid.slice(0, 20).map((x) => `<tr>
+            <td>${esc(x.customer)}</td><td>${money(x.amount)}</td>
+            <td class="small">${x.paidDate ? fmtDate(x.paidDate) : "—"} by ${esc(x.paidBy || "—")}</td>
+            <td><button class="btn btn-red" onclick="doDeleteDebt('${id}','${x.id}')">✕</button></td>
+          </tr>`).join("")}
+        </table></div>` : ""}
+      </div></div>
+
+      <div class="section ${tab === "close" ? "active" : ""}"><div class="card">
+        <h2>🔒 Close the day</h2>
+        <p class="small">Count the physical cash in the drawer. The system expects <b>${money(tMoney)}</b> from today's sales.</p>
+        <div id="closeMsg"></div>
+        <label>How much cash did you count?</label>
+        <input id="closeCounted" type="number" min="0" step="any" />
+        <button class="btn btn-primary btn-block" onclick="doClosing('${id}')">🔒 Save closing</button>
+        ${d.isOwner && (d.closings || []).length ? `<hr style="margin:14px 0"><p class="small"><b>Closing history:</b></p>
+        <div style="overflow-x:auto"><table>
+          <tr><th>Date</th><th>Expected</th><th>Counted</th><th>Difference</th><th>By</th></tr>
+          ${d.closings.map((c) => `<tr>
+            <td class="small">${c.day}</td><td>${money(c.expected)}</td><td>${money(c.counted)}</td>
+            <td style="color:${c.difference === 0 ? "#2e7d32" : "#c62828"};font-weight:700">${money(c.difference)}</td>
+            <td>${esc(c.worker || "—")}</td>
+          </tr>`).join("")}
+        </table></div>` : ""}
+      </div></div>
+
+      ${d.isOwner ? `<div class="section ${tab === "expenses" ? "active" : ""}"><div class="card">
+        <h2>💸 Expenses (owner only)</h2>
+        <p class="small">Money spent that is NOT buying goods: transport, fuel, rent, packaging...</p>
+        <div id="expMsg"></div>
+        <label>Amount (naira)</label><input id="expAmount" type="number" min="1" step="any" />
+        <label>Reason</label><input id="expReason" placeholder="e.g. Transport to Balogun market" />
+        <button class="btn btn-primary btn-block" onclick="doAddExpense('${id}')">💾 Save expense</button>
+        <hr style="margin:14px 0">
+        <p><b>Total expenses: ${money(d.expensesTotal || 0)}</b></p>
+        ${(d.expenses || []).length === 0 ? "<p>No expenses yet.</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Date</th><th>Reason</th><th>Amount</th><th></th></tr>
+          ${d.expenses.map((e) => `<tr>
+            <td class="small">${fmtDate(e.date)}</td><td>${esc(e.reason)}</td><td>${money(e.amount)}</td>
+            <td><button class="btn btn-red" onclick="doDeleteExpense('${id}','${e.id}')">✕</button></td>
+          </tr>`).join("")}
+        </table></div>`}
+      </div></div>` : ""}
+
       ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
         <h2>🛠 Corrections log (owner only)</h2>
         ${(d.corrections || []).length === 0 ? "<p>No corrections yet. ✅</p>" : `
@@ -753,6 +887,7 @@ async function renderStore(id, tab = "sale", msg = "") {
       </div></div>` : ""}
     </div>`;
 
+  updateOutboxBadge();
   renderSalePicker(d.products);
   if (d.products.some((p) => p.hasPhoto)) ensurePhotos(id, d.photosAt || 0);
 }
@@ -812,13 +947,13 @@ async function doSale(id) {
   const btn = document.getElementById("saleBtn");
   if (btn) { btn.disabled = true; btn.textContent = "Saving..."; }
   try {
-    await api(`/api/stores/${id}/sales`, { method: "POST", body: JSON.stringify({
+    const r = await submitWrite(`/api/stores/${id}/sales`, "POST", {
       productId: val("saleProduct"),
       qty: Number(val("saleQty")),
       amount: val("saleAmount") === "" ? undefined : Number(val("saleAmount")),
-      worker: sellerName(id) }) });
+      worker: sellerName(id) });
     saleSaving = false;
-    renderStore(id, "sale", "Sale saved ✅");
+    renderStore(id, "sale", r.queued ? `📶 No network — sale saved on this phone (${outbox.length} queued). It will send automatically.` : "Sale saved ✅");
   } catch (e) {
     saleSaving = false;
     if (btn) { btn.disabled = false; btn.textContent = "💾 Save sale"; }
@@ -923,6 +1058,63 @@ async function doBackup() {
     document.body.appendChild(a); a.click(); a.remove();
     alert("Backup downloaded ✅ Keep this file safe.");
   } catch (e) { alert(e.message); }
+}
+
+// ---------- DEBTS / EXPENSES / CLOSING ----------
+async function doAddDebt(id) {
+  try {
+    const dr = await submitWrite(`/api/stores/${id}/debts`, "POST", {
+      customer: val("dbCustomer"), amount: Number(val("dbAmount")),
+      note: val("dbNote"), worker: sellerName(id) });
+    renderStore(id, "debts", dr.queued ? `📶 No network — debt saved on this phone (${outbox.length} queued).` : "Debt recorded ✅ The owner can see it anytime.");
+  } catch (e) { document.getElementById("debtMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doPayDebt(id, did) {
+  if (!confirm("Confirm: the customer has PAID this debt?")) return;
+  try {
+    const pr = await submitWrite(`/api/stores/${id}/debts/${did}/pay`, "PUT", { worker: sellerName(id) });
+    renderStore(id, "debts", pr.queued ? "📶 No network — will mark as paid when network returns." : "Marked as paid ✅");
+  } catch (e) { alert(e.message); }
+}
+async function doDeleteDebt(id, did) {
+  const reason = prompt("Why are you removing this debt? (recorded in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this debt entry?")) return;
+  try {
+    await api(`/api/stores/${id}/debts/${did}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "debts", "Debt removed ✅ Reason recorded.");
+  } catch (e) { alert(e.message); }
+}
+async function doAddExpense(id) {
+  try {
+    await api(`/api/stores/${id}/expenses`, { method: "POST", body: JSON.stringify({
+      amount: Number(val("expAmount")), reason: val("expReason") }) });
+    renderStore(id, "expenses", "Expense saved ✅");
+  } catch (e) { document.getElementById("expMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doDeleteExpense(id, eid) {
+  const reason = prompt("Why are you removing this expense? (recorded in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this expense?")) return;
+  try {
+    await api(`/api/stores/${id}/expenses/${eid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "expenses", "Expense removed ✅");
+  } catch (e) { alert(e.message); }
+}
+async function doClosing(id) {
+  const counted = val("closeCounted");
+  if (counted === "" || isNaN(Number(counted))) { alert("Type the cash you counted."); return; }
+  try {
+    const r = await api(`/api/stores/${id}/closing`, { method: "POST", body: JSON.stringify({
+      counted: Number(counted), worker: sellerName(id) }) });
+    const diff = r.difference;
+    const msg = diff === 0
+      ? `Closing saved: counted ${money(r.counted)} = expected ✅ Perfect.`
+      : `Closing saved: counted ${money(r.counted)}, expected ${money(r.expected)} — DIFFERENCE ${diff > 0 ? "+" : ""}${money(diff)} (owner notified in history)`;
+    renderStore(id, "close", msg);
+  } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 
 // ================= START =================
