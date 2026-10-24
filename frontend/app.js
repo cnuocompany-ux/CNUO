@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v21 =====
+// ===== MY STORES MANAGER — FRONTEND v22 =====
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
 let API = localStorage.getItem("apiUrl") || "";
@@ -504,7 +504,8 @@ async function renderHome(msg = "") {
       <h1>🏪 My Stores</h1>
       <span data-outbox-badge class="badge badge-low" style="display:${outbox.length ? "" : "none"}">📶 ${outbox.length} queued</span>
       <div>
-        ${ownerToken ? `<button class="btn btn-green" onclick="showAddStore()">+ Add Store</button>
+        ${ownerToken ? `<button class="btn btn-primary" onclick="renderReport()">📰 Report</button>
+        <button class="btn btn-green" onclick="showAddStore()">+ Add Store</button>
         <button class="btn btn-gray" onclick="logoutOwner()">Owner logout</button>`
         : `<button class="btn btn-gray" onclick="showOwnerLogin()">Owner login</button>`}
       </div></div>
@@ -712,6 +713,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "log" ? "active" : ""}" onclick="renderStore('${id}','log')">📋 Sales log</div>
         <div class="tab ${tab === "debts" ? "active" : ""}" onclick="renderStore('${id}','debts')">🧾 Debts</div>
         <div class="tab ${tab === "close" ? "active" : ""}" onclick="renderStore('${id}','close')">🔒 Close day</div>
+        <div class="tab ${tab === "notes" ? "active" : ""}" onclick="renderStore('${id}','notes')">📣 Notes</div>
+        ${d.isOwner ? `<div class="tab ${tab === "customers" ? "active" : ""}" onclick="renderStore('${id}','customers')">👗 Customers</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "fixes" ? "active" : ""}" onclick="renderStore('${id}','fixes')">🛠 Corrections</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "settings" ? "active" : ""}" onclick="renderStore('${id}','settings')">⚙️ Settings</div>` : ""}
@@ -847,6 +850,57 @@ async function renderStore(id, tab = "sale", msg = "") {
           ${d.expenses.map((e) => `<tr>
             <td class="small">${fmtDate(e.date)}</td><td>${esc(e.reason)}</td><td>${money(e.amount)}</td>
             <td><button class="btn btn-red" onclick="doDeleteExpense('${id}','${e.id}')">✕</button></td>
+          </tr>`).join("")}
+        </table></div>`}
+      </div></div>` : ""}
+
+      <div class="section ${tab === "notes" ? "active" : ""}"><div class="card">
+        <h2>📣 Notes to the owner</h2>
+        <p class="small">Staff: report anything - price changes, problems, requests. The owner reads these.</p>
+        <div id="noteMsg"></div>
+        <label>Your message (or tap the mic to speak it)</label>
+        <textarea id="noteText" rows="2" style="width:100%;padding:10px;border:1px solid #bbb;border-radius:8px"></textarea>
+        <button class="btn btn-gray btn-block" onclick="voiceFill('noteText','noteVoiceStatus')">🎤 Speak the note</button>
+        <div id="noteVoiceStatus" class="small"></div>
+        <button class="btn btn-primary btn-block" onclick="doAddNote('${id}')">📣 Send to owner</button>
+        ${d.isOwner ? `${(d.notes || []).length === 0 ? `<hr style="margin:14px 0"><p>No notes. ✅</p>` : `
+        <hr style="margin:14px 0">
+        <div style="overflow-x:auto"><table>
+          <tr><th>Date</th><th>Message</th><th>From</th><th></th></tr>
+          ${d.notes.map((n) => `<tr style="${n.heard ? "opacity:0.55" : ""}">
+            <td class="small">${fmtDate(n.date)}</td>
+            <td><b>${esc(n.text)}</b>${n.heard ? `<br><span class="small">✔ reviewed</span>` : ""}</td>
+            <td>${esc(n.worker || "—")}</td>
+            <td>${n.heard ? "" : `<button class="btn btn-green" onclick="doMarkNote('${id}','${n.id}')">✔ Done</button>`}
+                <button class="btn btn-red" onclick="doDeleteNote('${id}','${n.id}')">✕</button></td>
+          </tr>`).join("")}
+        </table></div>`}` : ""}
+      </div></div>
+
+      ${d.isOwner ? `<div class="section ${tab === "customers" ? "active" : ""}"><div class="card">
+        <h2>👗 Customer measurements book</h2>
+        <div id="custMsg"></div>
+        <label>Customer name</label><input id="cName" placeholder="e.g. Mama Ngozi" />
+        <label>Phone (optional)</label><input id="cPhone" placeholder="080..." />
+        <div class="stat-row" style="margin:4px 0">
+          <div><label>Bust/Chest</label><input id="cBust" placeholder="36" style="margin:2px 0" /></div>
+          <div><label>Waist</label><input id="cWaist" placeholder="32" style="margin:2px 0" /></div>
+          <div><label>Hip</label><input id="cHip" placeholder="40" style="margin:2px 0" /></div>
+          <div><label>Shoulder</label><input id="cShoulder" placeholder="16" style="margin:2px 0" /></div>
+          <div><label>Length</label><input id="cLength" placeholder="41" style="margin:2px 0" /></div>
+        </div>
+        <label>Notes (style, fabric preference...)</label><input id="cNotes" placeholder="e.g. prefers ankara, A-line" />
+        <button class="btn btn-primary btn-block" onclick="doAddCustomer('${id}')">💾 Save customer</button>
+        <hr style="margin:14px 0">
+        ${(d.customers || []).length === 0 ? "<p>No customers yet.</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Name</th><th>Phone</th><th>B</th><th>W</th><th>H</th><th>Sh</th><th>L</th><th>Notes</th><th></th></tr>
+          ${d.customers.map((c) => `<tr>
+            <td><b>${esc(c.name)}</b></td><td class="small">${esc(c.phone || "—")}</td>
+            <td>${esc(c.bust || "—")}</td><td>${esc(c.waist || "—")}</td><td>${esc(c.hip || "—")}</td>
+            <td>${esc(c.shoulder || "—")}</td><td>${esc(c.length || "—")}</td>
+            <td class="small">${esc(c.notes || "—")}</td>
+            <td><button class="btn btn-red" onclick="doDeleteCustomer('${id}','${c.id}')">✕</button></td>
           </tr>`).join("")}
         </table></div>`}
       </div></div>` : ""}
@@ -1115,6 +1169,79 @@ async function doClosing(id) {
       : `Closing saved: counted ${money(r.counted)}, expected ${money(r.expected)} — DIFFERENCE ${diff > 0 ? "+" : ""}${money(diff)} (owner notified in history)`;
     renderStore(id, "close", msg);
   } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+
+// ---------- NOTES / CUSTOMERS / OWNER REPORT ----------
+async function doAddNote(id) {
+  try {
+    const r = await submitWrite(`/api/stores/${id}/notes`, "POST", { text: val("noteText"), worker: sellerName(id) });
+    renderStore(id, "notes", r.queued ? "📶 No network — note saved on this phone, will send." : "📣 Note sent to the owner ✅");
+  } catch (e) { document.getElementById("noteMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doMarkNote(id, nid) {
+  try { await api(`/api/stores/${id}/notes/${nid}/heard`, { method: "PUT" }); renderStore(id, "notes", "Marked as reviewed ✅"); }
+  catch (e) { alert(e.message); }
+}
+async function doDeleteNote(id, nid) {
+  if (!confirm("Delete this note?")) return;
+  try { await api(`/api/stores/${id}/notes/${nid}`, { method: "DELETE" }); renderStore(id, "notes", "Note deleted"); }
+  catch (e) { alert(e.message); }
+}
+async function doAddCustomer(id) {
+  try {
+    await api(`/api/stores/${id}/customers`, { method: "POST", body: JSON.stringify({
+      name: val("cName"), phone: val("cPhone"), bust: val("cBust"), waist: val("cWaist"),
+      hip: val("cHip"), shoulder: val("cShoulder"), length: val("cLength"), notes: val("cNotes") }) });
+    renderStore(id, "customers", "Customer saved ✅");
+  } catch (e) { document.getElementById("custMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doDeleteCustomer(id, cid) {
+  if (!confirm("Delete this customer?")) return;
+  try { await api(`/api/stores/${id}/customers/${cid}`, { method: "DELETE" }); renderStore(id, "customers", "Customer deleted"); }
+  catch (e) { alert(e.message); }
+}
+
+// ---------- OWNER MORNING REPORT ----------
+async function renderReport() {
+  let r;
+  try { r = await api("/api/owner/report"); }
+  catch (e) { alert(e.message); return renderHome(); }
+  const T = r.totals;
+  app.innerHTML = `<div class="topbar"><h1>📰 Morning Report</h1>
+      <div><button class="btn btn-green" onclick="renderReport()">🔄 Refresh</button>
+      <button class="btn btn-gray" onclick="renderHome()">← My Stores</button></div></div>
+    <div class="container">
+      <p class="small">All your stores at a glance — ${new Date(r.today).toLocaleDateString()}</p>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${money(T.todaySales)}</div><div class="lbl">💰 Sold today (all stores)</div></div>
+        <div class="stat"><div class="num">${money(T.todayProfit)}</div><div class="lbl">Today's profit</div></div>
+        <div class="stat"><div class="num">${T.todayCount}</div><div class="lbl">Sales today</div></div>
+        <div class="stat"><div class="num">${money(T.yestSales)}</div><div class="lbl">Yesterday sold</div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${money(T.owed)}</div><div class="lbl">🧾 Total owed to you</div></div>
+        <div class="stat"><div class="num">${money(T.debtsTodayTotal)}</div><div class="lbl">Debts added today</div></div>
+        <div class="stat"><div class="num">${money(T.expensesToday)}</div><div class="lbl">💸 Expenses today</div></div>
+        <div class="stat"><div class="num" style="color:${T.lowCount ? "#c62828" : "#2e7d32"}">${T.lowCount}</div><div class="lbl">Low/finished items</div></div>
+      </div>
+      ${T.openNotes ? `<div class="msg msg-error">📣 ${T.openNotes} unread note(s) from staff — open the stores to read them</div>` : ""}
+      ${r.stores.map((s) => `<div class="card" style="border-left:6px solid ${esc(s.color)}">
+        <h2>${esc(s.name)}</h2>
+        <div class="stat-row">
+          <div class="stat"><div class="num">${money(s.todaySales)}</div><div class="lbl">Sold today</div></div>
+          <div class="stat"><div class="num">${money(s.todayProfit)}</div><div class="lbl">Profit today</div></div>
+          <div class="stat"><div class="num">${money(s.owed)}</div><div class="lbl">Owed</div></div>
+          <div class="stat"><div class="num">${s.todayCount}</div><div class="lbl">Sales</div></div>
+        </div>
+        <p class="small">
+          🧾 ${s.debtsToday ? `Debts today: ${s.debtsToday} (${money(s.debtsTodayTotal)}) — ` : ""}
+          💸 Expenses today: ${money(s.expensesToday)} ·
+          ${s.lowCount ? `<span style="color:#c62828">⚠️ ${s.lowCount} low/finished</span> · ` : ""}
+          ${s.openNotes ? `<span style="color:#c62828">📣 ${s.openNotes} unread note(s)</span> · ` : ""}
+          ${s.lastClosing ? `🔒 Last closing: counted ${money(s.lastClosing.counted)} vs ${money(s.lastClosing.expected)} → <b style="color:${s.lastClosing.difference === 0 ? "#2e7d32" : "#c62828"}">${money(s.lastClosing.difference)}</b>` : "🔒 No closing yet"}
+        </p>
+      </div>`).join("")}
+    </div>`;
 }
 
 // ================= START =================
