@@ -10,6 +10,162 @@ let saleSaving = false;
 const photoCache = {};
 let salePicker = { products: [], selected: null };
 const VOICE_SUPPORTED = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
+let assistantActive = false;
+let femaleVoice = null;
+function pickFemaleVoice() {
+  if (!("speechSynthesis" in window)) return;
+  const vs = speechSynthesis.getVoices();
+  femaleVoice =
+    vs.find((v) => /female/i.test(v.name)) ||
+    vs.find((v) => /zira|samantha|susan|victoria|serena|karen|moira|tessa|fiona|google uk english female/i.test(v.name)) ||
+    vs.find((v) => v.lang === "en-GB") ||
+    vs.find((v) => v.lang && v.lang.startsWith("en")) || null;
+}
+if ("speechSynthesis" in window) {
+  pickFemaleVoice();
+  speechSynthesis.onvoiceschanged = pickFemaleVoice;
+}
+function speak(text, onDone) {
+  if (!("speechSynthesis" in window)) { if (onDone) onDone(); return; }
+  try { speechSynthesis.cancel(); } catch (e) {}
+  const u = new SpeechSynthesisUtterance(text);
+  if (femaleVoice) u.voice = femaleVoice;
+  u.lang = "en-NG"; u.rate = 0.98; u.pitch = 1.05;
+  let done = false;
+  const finish = () => { if (!done) { done = true; if (onDone) onDone(); } };
+  u.onend = finish; u.onerror = finish;
+  speechSynthesis.speak(u);
+  setTimeout(finish, Math.max(3500, text.length * 130));
+}
+function listenOnce() {
+  return new Promise((resolve) => {
+    if (!VOICE_SUPPORTED) return resolve("");
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const r = new SR();
+    r.lang = "en-NG"; r.interimResults = false; r.maxAlternatives = 1;
+    let got = false;
+    const done = (v) => { if (!got) { got = true; try { r.stop(); } catch (e) {} resolve(v); } };
+    r.onresult = (e) => { if (e.results && e.results[0] && e.results[0][0]) done(e.results[0][0].transcript.trim()); };
+    r.onerror = () => done("");
+    r.onend = () => done("");
+    try { r.start(); } catch (e) { done(""); }
+    setTimeout(() => done(""), 12000);
+  });
+}
+// She speaks the question, then listens (auto, with a tap-to-answer fallback button)
+function ask(question) {
+  return new Promise((resolve) => {
+    const status = document.getElementById("voiceStatus");
+    if (status) status.innerHTML = '<div style="background:#e8f0fe;border-radius:8px;padding:10px">' +
+      '<b>\u{1F50A} She asks:</b> "' + esc(question) + '"<br>' +
+      '<span class="small">\u{1F3A4} Listening automatically... or tap:</span> ' +
+      '<button class="btn btn-gray" id="answerBtn" style="padding:6px 12px">\u{1F3A4} Answer</button> ' +
+      '<button class="btn btn-gray" id="stopBtn" style="padding:6px 12px">\u{23F9} Stop</button></div>';
+    let finished = false;
+    const finish = (v) => { if (!finished) { finished = true; resolve(v); } };
+    const stopBtn = document.getElementById("stopBtn");
+    if (stopBtn) stopBtn.onclick = () => { assistantActive = false; try { speechSynthesis.cancel(); } catch (e) {} finish(null); };
+    const startListening = () => {
+      const b = document.getElementById("answerBtn");
+      if (b) b.style.display = "none";
+      listenOnce().then(finish);
+    };
+    const ansBtn = document.getElementById("answerBtn");
+    if (ansBtn) ansBtn.onclick = startListening;
+    speak(question, () => { if (assistantActive) startListening(); });
+  });
+}
+function endAssistant(msg) {
+  assistantActive = false;
+  try { speechSynthesis.cancel(); } catch (e) {}
+  const status = document.getElementById("voiceStatus");
+  if (status && msg) status.innerHTML = '<div class="small">' + esc(msg) + ' \u2014 tap \u{1F3A4} VOICE ASSISTANT to start again.</div>';
+}
+function describeCurrentSale() {
+  const p = salePicker.selected;
+  const q = val("saleQty") || "?";
+  const a = val("saleAmount") || "?";
+  return (p ? p.name : "no product selected") + ", quantity " + q + ", amount " + a + " naira";
+}
+function applyCorrection(text) {
+  const lower = " " + String(text || "").toLowerCase() + " ";
+  const units = "(yards?|yds?|litres?|liters?|pieces?|pcs?|packs?|bottles?|wraps?)";
+  const qm = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?)\\s*" + units));
+  if (qm) {
+    const v = spokenNumber(qm[1]);
+    if (v !== null) { document.getElementById("saleQty").value = v; prefillAmount(); return true; }
+  }
+  const amountWords = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMRE + ")*)\\s*(?:naira)?"));
+  if (amountWords) {
+    const v = spokenNumber(amountWords[1]);
+    if (v !== null && /\d|one|two|three|four|five|six|seven|eight|nine|half/.test(amountWords[1])) {
+      document.getElementById("saleAmount").value = v; return true;
+    }
+  }
+  return false;
+}
+// The full talking assistant
+async function voiceAssistant(storeId) {
+  if (!VOICE_SUPPORTED) { alert("Voice assistant needs the Chrome browser."); return; }
+  if (assistantActive) return;
+  assistantActive = true;
+  const status = document.getElementById("voiceStatus");
+
+  // 1) name
+  let name = sellerName(storeId);
+  let ans = await ask(name ? ("Welcome back, " + name + "! What did you sell today?") : "Hello! What is your name?");
+  if (ans === null) return endAssistant("Stopped");
+  ans = (ans || "").trim();
+  if (ans) {
+    const m = ans.match(/(?:name is|i am|i'm)\s+([a-zA-Z]+)/i);
+    name = m ? m[1] : ans.split(/\s+/).slice(0, 2).join(" ");
+    localStorage.setItem("seller_" + storeId, name);
+  }
+  if (!name) name = "Seller";
+
+  // 2) the sale
+  const saleText = await ask("Thank you, " + name + ". What did you sell? For example: 2 and a half yards of Ankara for 9 thousand naira.");
+  if (saleText === null) return endAssistant("Stopped");
+  if (!saleText || !saleText.trim()) {
+    speak("I did not hear anything. Please try again.");
+    return endAssistant("Nothing heard");
+  }
+  const parsed = parseSpokenSale(saleText, salePicker.products);
+  if (parsed.product) pickProduct(parsed.product.id);
+  if (parsed.qty !== null) document.getElementById("saleQty").value = parsed.qty;
+  if (parsed.amount !== null) document.getElementById("saleAmount").value = parsed.amount;
+  else prefillAmount();
+
+  // 3) confirm
+  let conf = await ask("You said: " + describeCurrentSale() + ". Is that correct? Say yes, or say the correction, like: 3 yards, or 8000 naira.");
+  if (conf === null) return endAssistant("Stopped");
+  conf = (conf || "").toLowerCase().trim();
+  const isYes = /\b(yes|correct|okay|ok|sure|exactly|right|confirm|that's right)\b/.test(conf);
+  if (!isYes && conf && applyCorrection(conf)) {
+    conf = await ask("Updated: " + describeCurrentSale() + ". Is it correct now?");
+    if (conf === null) return endAssistant("Stopped");
+    conf = (conf || "").toLowerCase();
+  }
+  if (/\b(yes|correct|okay|ok|sure|exactly|right|confirm|that's right)\b/.test(conf)) {
+    try {
+      await api("/api/stores/" + storeId + "/sales", { method: "POST", body: JSON.stringify({
+        productId: val("saleProduct"),
+        qty: Number(val("saleQty")),
+        amount: val("saleAmount") === "" ? undefined : Number(val("saleAmount")),
+        worker: name }) });
+      speak("Sale saved! Thank you, " + name + ". Goodbye.");
+      if (status) status.innerHTML = '<div class="msg msg-ok">\u2705 Sale saved by voice: ' + esc(describeCurrentSale()) + '</div>';
+      assistantActive = false;
+      setTimeout(() => renderStore(storeId, "sale", "Sale saved \u2705"), 1600);
+      return;
+    } catch (e) {
+      speak("Sorry, saving failed.");
+      return endAssistant("Error: " + e.message);
+    }
+  }
+  speak("Please check the details on the screen, then press Save sale. Goodbye.");
+  endAssistant("Not confirmed \u2014 details are on the form above");
+}
 
 const app = document.getElementById("app");
 const money = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -391,8 +547,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <h2>Record a sale</h2>
         <div id="saleMsg"></div>
         ${VOICE_SUPPORTED ? `
-        <button class="btn btn-gray btn-block" onclick="voiceSale()">🎤 SPEAK YOUR SALE — no typing needed</button>
-        <div id="voiceStatus" class="small" style="margin:6px 0;color:#1F4E79;font-weight:600">Tap the mic, then say e.g. "Sold 2 and a half yards of Ankara for nine thousand naira"</div>
+                <button class="btn btn-primary btn-block" onclick="voiceAssistant('${id}')">\u{1F3A4} VOICE ASSISTANT — she asks your name & what you sold</button>
+        <div id="voiceStatus" class="small" style="margin:6px 0;color:#1F4E79;font-weight:600">Tap and she will talk to you. Or type below \u{1F50D}</div>
         <hr style="margin:12px 0">` : `<p class="small">🎤 Voice input needs Chrome browser</p>`}
         <label>Product — type ANY part of the name to search (no scrolling)</label>
         <div id="pickerBox"></div>
