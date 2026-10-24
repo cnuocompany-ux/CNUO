@@ -96,7 +96,7 @@ function applyCorrection(text) {
     const v = spokenNumber(qm[1]);
     if (v !== null) { document.getElementById("saleQty").value = v; prefillAmount(); return true; }
   }
-  const amountWords = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMRE + ")*)\\s*(?:naira)?"));
+  const amountWords = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMANY + ")*)\\s*(?:naira)?"));
   if (amountWords) {
     const v = spokenNumber(amountWords[1]);
     if (v !== null && /\d|one|two|three|four|five|six|seven|eight|nine|half/.test(amountWords[1])) {
@@ -108,7 +108,7 @@ function applyCorrection(text) {
 // ---------- smart helpers ----------
 function parseNumberOnly(text) {
   const lower = " " + String(text || "").toLowerCase() + " ";
-  const m = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?(?:\\s+" + NUMRE + ")*)"));
+  const m = lower.match(new RegExp("(" + NUMRE + "(?:\\s+(?:" + NUMANY + "|and|a|an|half))*)"));
   if (!m) return null;
   return spokenNumber(m[1]);
 }
@@ -157,6 +157,9 @@ async function voiceAssistant(storeId) {
   const parsed = parseSpokenSale(saleText, salePicker.products);
 
   // 3) follow-up: which product?
+  if (!parsed.product && salePicker.products.length === 1) {
+    parsed.product = salePicker.products[0]; // only one product in this store — she knows it
+  }
   if (!parsed.product) {
     const pAns = await ask("Which product did you sell? Say its name.");
     if (pAns === null) return endAssistant("Stopped");
@@ -301,7 +304,8 @@ const NUMWORDS = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7
   ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
   seventeen:17, eighteen:18, nineteen:19, twenty:20, thirty:30, forty:40, fifty:50,
   sixty:60, seventy:70, eighty:80, ninety:90, half:0.5 };
-const NUMRE = "(?:\\d+(?:\\.\\d+)?|" + Object.keys(NUMWORDS).join("|") + ")";
+const NUMRE = "(?:\\d+(?:\\.\\d+)?|" + Object.keys(NUMWORDS).sort((a, b) => b.length - a.length).join("|") + ")";
+const NUMANY = "(?:" + NUMRE + "|thousand|hundred)";
 
 function spokenNumber(str) {
   const tokens = String(str).toLowerCase().trim().split(/\s+/).filter((t) => t && t !== "and" && t !== "a" && t !== "an");
@@ -333,26 +337,37 @@ function parseSpokenSale(text, products) {
     if (digitGroups.length >= 2) qty = parseFloat(digitGroups[0]);
   }
   let amount = null;
-  const amountM = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMRE + ")*)\\s*(?:naira|ngn|₦)"));
+  const amountM = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMANY + ")*)\\s*(?:naira|ngn|₦)"));
   if (amountM) amount = spokenNumber(amountM[1]);
   if (amount === null) {
     const forM = lower.match(/(?:for|at|price)\s+([a-z0-9\s]+?)(?:\s+naira)?$/);
     if (forM) amount = spokenNumber(forM[1]);
   }
-  if (amount === null) {
+  let firstGroup = null, lastGroup = null;
+  {
     const groups = [...lower.matchAll(new RegExp("(" + NUMRE + "(?:\\s+(?:" + NUMRE + "|thousand|hundred))*)", "g"))].map((m) => m[1]);
-    if (groups.length) {
-      let cand = groups[groups.length - 1];
-      if (qty !== null && spokenNumber(cand) === qty) cand = groups.length > 1 ? groups[groups.length - 2] : null;
-      amount = cand ? spokenNumber(cand) : null;
-    }
+    firstGroup = groups[0] || null;
+    lastGroup = groups.length ? groups[groups.length - 1] : null;
   }
+
   let best = null, bestScore = 0;
   for (const p of products) {
     const words = String(p.name).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
     let score = 0;
     for (const w of words) { if (lower.includes(w)) score++; }
     if (score > bestScore) { bestScore = score; best = p; }
+  }
+  if (qty === null && amount === null && firstGroup && firstGroup === lastGroup) {
+    const numPos = lower.indexOf(firstGroup.trim().split(/\s+/)[0]);
+    const prodWords = best ? String(best.name).toLowerCase().split(/\s+/).filter((w) => w.length > 2) : [];
+    const prodPos = prodWords.length ? lower.indexOf(prodWords[0]) : -1;
+    if (best && prodPos >= 0 && numPos >= 0 && numPos < prodPos) qty = spokenNumber(firstGroup);
+    else amount = spokenNumber(firstGroup);
+  } else if (amount === null && lastGroup) {
+    let cand = lastGroup;
+    if (qty !== null && spokenNumber(cand) === qty) cand = firstGroup !== lastGroup ? firstGroup : null;
+    if (qty === null && firstGroup && /^\d/.test(firstGroup.trim())) qty = spokenNumber(firstGroup);
+    amount = cand ? spokenNumber(cand) : amount;
   }
   return { qty, amount, product: best, heard: text.trim() };
 }
@@ -640,8 +655,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <h2>Record a sale</h2>
         <div id="saleMsg"></div>
         ${VOICE_SUPPORTED ? `
-                <button class="btn btn-primary btn-block" onclick="voiceAssistant('${id}')">\u{1F3A4} ${ASSISTANT_NAME.toUpperCase()} \u2014 voice assistant (she asks everything)</button>
-        <div id="voiceStatus" class="small" style="margin:6px 0;color:#1F4E79;font-weight:600">Tap and ${ASSISTANT_NAME} will guide you, step by step \u2014 or type below \u{1F50D}</div>
+                <button class="btn btn-primary btn-block" onclick="voiceAssistant('${id}')">\u{1F3A4} ${ASSISTANT_NAME.toUpperCase()}</button>
+        <div id="voiceStatus" class="small" style="margin:6px 0;color:#1F4E79;font-weight:600">Tap to talk \u2014 or type below</div>
         <hr style="margin:12px 0">` : `<p class="small">🎤 Voice input needs Chrome browser</p>`}
         <label>Product — type ANY part of the name to search (no scrolling)</label>
         <div id="pickerBox"></div>
