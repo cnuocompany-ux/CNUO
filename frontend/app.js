@@ -114,37 +114,18 @@ function parseNumberOnly(text) {
 }
 function matchProductText(text, products) {
   const lower = " " + String(text || "").toLowerCase().replace(/[?!.,]/g, " ") + " ";
+  const squashed = lower.replace(/[^a-z0-9]/g, "");
   let best = null, bs = 0;
   for (const p of products) {
-    const words = String(p.name).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    const pname = String(p.name).toLowerCase();
+    const pSquash = pname.replace(/[^a-z0-9]/g, "");
+    const words = pname.split(/\s+/).filter((w) => w.length > 2);
     let s = 0;
     for (const w of words) { if (lower.includes(w)) s++; }
+    if (pSquash.length > 3 && squashed.includes(pSquash)) s += 2;
     if (s > bs) { bs = s; best = p; }
   }
   return best;
-}
-function describeCurrentSale() {
-  const p = salePicker.selected;
-  const q = val("saleQty") || "?";
-  const a = val("saleAmount") || "?";
-  return (p ? p.name : "no product") + ", quantity " + q + ", amount " + a + " naira";
-}
-function applyCorrection(text) {
-  const lower = " " + String(text || "").toLowerCase() + " ";
-  const units = "(yards?|yds?|litres?|liters?|pieces?|pcs?|packs?|bottles?|wraps?)";
-  const qm = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?)\\s*" + units));
-  if (qm) {
-    const v = spokenNumber(qm[1]);
-    if (v !== null) { document.getElementById("saleQty").value = v; prefillAmount(); return true; }
-  }
-  const amountWords = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMRE + ")*)\\s*(?:naira)?"));
-  if (amountWords) {
-    const v = spokenNumber(amountWords[1]);
-    if (v !== null && /\\d|one|two|three|four|five|six|seven|eight|nine|half/.test(amountWords[1])) {
-      document.getElementById("saleAmount").value = v; return true;
-    }
-  }
-  return false;
 }
 // ---------- AMARA: the talking sales assistant (asks until everything is clear) ----------
 async function voiceAssistant(storeId) {
@@ -167,7 +148,7 @@ async function voiceAssistant(storeId) {
   if (!name) name = "Seller";
 
   // 2) what did you sell
-  const saleText = await ask("Thank you, " + name + ". What did you sell? For example: 2 and a half yards of Ankara for 9 thousand naira.");
+  const saleText = await ask("What did you sell?");
   if (saleText === null) return endAssistant("Stopped");
   if (!saleText || !saleText.trim()) {
     speak("I did not hear anything. Please try again.");
@@ -181,18 +162,28 @@ async function voiceAssistant(storeId) {
     if (pAns === null) return endAssistant("Stopped");
     parsed.product = matchProductText(pAns, salePicker.products);
     if (!parsed.product) {
-      speak("I could not find that product. Please choose it on the screen.");
-      return endAssistant("Product not found");
+      const pAns2 = await ask("Say the product name again, slowly.");
+      if (pAns2 === null) return endAssistant("Stopped");
+      parsed.product = matchProductText(pAns2, salePicker.products);
+    }
+    if (!parsed.product) {
+      const rdy = await ask("Please TAP the product on the screen, then say: ready.");
+      if (rdy === null) return endAssistant("Stopped");
+      parsed.product = salePicker.selected;
+      if (!parsed.product) { speak("No product chosen. Goodbye."); return endAssistant("No product"); }
     }
   }
   pickProduct(parsed.product.id);
+  if (parsed.qty !== null) document.getElementById("saleQty").value = parsed.qty;
+  if (parsed.amount !== null) document.getElementById("saleAmount").value = parsed.amount;
+  else prefillAmount();
 
   // 4) follow-up: how many?
   if (parsed.qty === null) {
-    const qAns = await ask("How many did you sell? You can say halves, like: two and a half.");
+    const qAns = await ask("How many did you sell?");
     if (qAns === null) return endAssistant("Stopped");
     parsed.qty = parseNumberOnly(qAns);
-    if (parsed.qty !== null) document.getElementById("saleQty").value = parsed.qty;
+    if (parsed.qty !== null) { document.getElementById("saleQty").value = parsed.qty; prefillAmount(); }
   }
   const qtyN = Number(val("saleQty") || 1);
 
@@ -200,7 +191,12 @@ async function voiceAssistant(storeId) {
   if (parsed.amount === null) {
     const aAns = await ask("At what price did you sell " + (qtyN > 1 ? "each one" : "it") + "? Say the amount in naira.");
     if (aAns === null) return endAssistant("Stopped");
-    const unit = parseNumberOnly(aAns);
+    let unit = parseNumberOnly(aAns);
+    if (unit === null) {
+      const again = await ask("Say the amount again. Only the number.");
+      if (again === null) return endAssistant("Stopped");
+      unit = parseNumberOnly(again);
+    }
     if (unit !== null) {
       if (qtyN > 1) {
         const t = await ask(unit + " naira — is that the price of EACH one, or the TOTAL for all " + qtyN + "?");
@@ -215,8 +211,8 @@ async function voiceAssistant(storeId) {
     if (t === null) return endAssistant("Stopped");
     if (/each|per|apiece/.test((t || "").toLowerCase())) {
       parsed.amount = Math.round(parsed.amount * qtyN * 100) / 100;
-      document.getElementById("saleAmount").value = parsed.amount;
     }
+    document.getElementById("saleAmount").value = parsed.amount;
   }
 
   // 6) final confirm
@@ -309,11 +305,17 @@ const NUMRE = "(?:\\d+(?:\\.\\d+)?|" + Object.keys(NUMWORDS).join("|") + ")";
 
 function spokenNumber(str) {
   const tokens = String(str).toLowerCase().trim().split(/\s+/).filter((t) => t && t !== "and" && t !== "a" && t !== "an");
-  let total = 0, cur = 0, has = false;
-  for (const t of tokens) {
-    if (t === "thousand") { cur = (cur || 1) * 1000; total += cur; cur = 0; has = true; }
+  let total = 0, cur = 0, has = false, afterThousand = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i], next = tokens[i + 1];
+    if (t === "thousand") { cur = (cur || 1) * 1000; total += cur; cur = 0; has = true; afterThousand = true; }
     else if (t === "hundred") { cur = (cur || 1) * 100; has = true; }
-    else if (NUMWORDS[t] !== undefined) { cur += NUMWORDS[t]; has = true; }
+    else if (NUMWORDS[t] !== undefined) {
+      const v = NUMWORDS[t];
+      if (afterThousand && v > 0 && v < 100 && next !== "hundred") cur += v * 100;
+      else cur += v;
+      has = true;
+    }
     else if (/^\d+(\.\d+)?$/.test(t)) { cur += parseFloat(t); has = true; }
   }
   return has ? total + cur : null;
@@ -327,8 +329,8 @@ function parseSpokenSale(text, products) {
   const qm = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?)\\s*" + units));
   if (qm) qty = spokenNumber(qm[1]);
   if (qty === null) {
-    const anyNum = lower.match(/(\d+(?:\.\d+)?)/);
-    if (anyNum) qty = parseFloat(anyNum[1]);
+    const digitGroups = [...lower.matchAll(/\d+(?:\.\d+)?/g)].map((m) => m[0]);
+    if (digitGroups.length >= 2) qty = parseFloat(digitGroups[0]);
   }
   let amount = null;
   const amountM = lower.match(new RegExp("(" + NUMRE + "(?:\\s+" + NUMRE + ")*)\\s*(?:naira|ngn|₦)"));
@@ -336,6 +338,14 @@ function parseSpokenSale(text, products) {
   if (amount === null) {
     const forM = lower.match(/(?:for|at|price)\s+([a-z0-9\s]+?)(?:\s+naira)?$/);
     if (forM) amount = spokenNumber(forM[1]);
+  }
+  if (amount === null) {
+    const groups = [...lower.matchAll(new RegExp("(" + NUMRE + "(?:\\s+(?:" + NUMRE + "|thousand|hundred))*)", "g"))].map((m) => m[1]);
+    if (groups.length) {
+      let cand = groups[groups.length - 1];
+      if (qty !== null && spokenNumber(cand) === qty) cand = groups.length > 1 ? groups[groups.length - 2] : null;
+      amount = cand ? spokenNumber(cand) : null;
+    }
   }
   let best = null, bestScore = 0;
   for (const p of products) {
