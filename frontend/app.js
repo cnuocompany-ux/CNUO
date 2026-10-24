@@ -1,5 +1,5 @@
-// ===== MY STORES MANAGER — FRONTEND v12 =====
-// v11 (speed, halves, corrections) + VOICE INPUT + SMART SUGGESTIONS
+// ===== MY STORES MANAGER — FRONTEND v19 =====
+// v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
 let API = localStorage.getItem("apiUrl") || "";
 let ownerToken = localStorage.getItem("ownerToken") || "";
 let storeToken = localStorage.getItem("storeToken") || "";
@@ -89,7 +89,7 @@ function describeCurrentSale() {
   return (p ? p.name : "no product selected") + ", quantity " + q + ", amount " + a + " naira";
 }
 function applyCorrection(text) {
-  const lower = " " + String(text || "").toLowerCase() + " ";
+  const lower = " " + String(text || "").toLowerCase().replace(/(\d),(\d)/g, "$1$2") + " ";
   const units = "(yards?|yds?|litres?|liters?|pieces?|pcs?|packs?|bottles?|wraps?)";
   const qm = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?)\\s*" + units));
   if (qm) {
@@ -107,7 +107,7 @@ function applyCorrection(text) {
 }
 // ---------- smart helpers ----------
 function parseNumberOnly(text) {
-  const lower = " " + String(text || "").toLowerCase() + " ";
+  const lower = " " + String(text || "").toLowerCase().replace(/(\d),(\d)/g, "$1$2") + " ";
   const m = lower.match(new RegExp("(" + NUMRE + "(?:\\s+(?:" + NUMANY + "|and|a|an|half))*)"));
   if (!m) return null;
   return spokenNumber(m[1]);
@@ -327,7 +327,7 @@ function spokenNumber(str) {
 
 // Parse "sold 2 and a half yards of ankara for nine thousand naira"
 function parseSpokenSale(text, products) {
-  const lower = " " + text.toLowerCase().replace(/[?!.,]/g, " ") + " ";
+  const lower = " " + String(text).replace(/(\d),(\d)/g, "$1$2").toLowerCase().replace(/[?!.,]/g, " ") + " ";
   const units = "(yards?|yds?|litres?|liters?|pieces?|pcs?|packs?|bottles?|wraps?|rolls?|meters?|metres?)";
   let qty = null;
   const qm = lower.match(new RegExp("(" + NUMRE + "(?:\\s+and\\s+(?:a\\s+)?half)?)\\s*" + units));
