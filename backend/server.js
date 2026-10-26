@@ -1,5 +1,5 @@
 // ===== MY STORES MANAGER — BACKEND v20 =====
-// + DEBTS + EXPENSES + CLOSING + NOTES-TO-OWNER + CUSTOMERS + MORNING REPORT
+// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -196,6 +196,9 @@ app.get("/api/stores/:id", (req, res) => {
     isOwner, products, sales: s.sales.slice().reverse(),
     corrections: isOwner ? (s.corrections || []).slice().reverse() : [],
     debts: unpaid, debtsPaid: paidDebts, owedTotal,
+    posToday: (() => { const t = new Date().toISOString().slice(0, 10); return (s.pos || []).filter((x) => x.date.slice(0, 10) === t).slice().reverse(); })(),
+    posChargesToday: round2((s.pos || []).filter((x) => x.date.slice(0, 10) === new Date().toISOString().slice(0, 10)).reduce((a, x) => a + x.charge, 0)),
+    posChargesAll: round2((s.pos || []).reduce((a, x) => a + x.charge, 0)),
     notes: isOwner ? (s.notes || []).slice().reverse() : [],
     customers: isOwner ? (s.customers || []).slice().reverse() : [],
     expenses: isOwner ? expenses.slice().reverse() : [], expensesTotal,
@@ -424,7 +427,10 @@ app.post("/api/stores/:id/closing", storeAuth, async (req, res) => {
   const counted = Number(req.body.counted);
   if (!(counted >= 0)) return res.status(400).json({ error: "Counted amount is required." });
   const today = new Date().toISOString().slice(0, 10);
-  const expected = round2(req.store.sales.filter((x) => x.date.slice(0, 10) === today).reduce((a, x) => a + x.amount, 0));
+  const salesSum = req.store.sales.filter((x) => x.date.slice(0, 10) === today).reduce((a, x) => a + x.amount, 0);
+  const posCash = (req.store.pos || []).filter((x) => x.date.slice(0, 10) === today)
+    .reduce((a, x) => a + (x.type === "TRANSFER" ? x.total : -x.amount), 0);
+  const expected = round2(salesSum + posCash);
   const difference = round2(counted - expected);
   const c = { id: uid(), date: new Date().toISOString(), day: today, expected, counted, difference,
     worker: String(req.body.worker || "").trim() };
@@ -502,7 +508,7 @@ app.delete("/api/stores/:id/customers/:cid", ownerAuth, async (req, res) => {
 app.get("/api/owner/report", ownerAuth, (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const yest = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  let T = { todaySales: 0, todayProfit: 0, todayCount: 0, yestSales: 0, owed: 0, debtsTodayTotal: 0, expensesToday: 0, lowCount: 0, openNotes: 0 };
+  let T = { todaySales: 0, todayProfit: 0, todayCount: 0, yestSales: 0, owed: 0, debtsTodayTotal: 0, expensesToday: 0, lowCount: 0, openNotes: 0, posChargesToday: 0 };
   const stores = db.stores.map((s) => {
     const products = withCalc(s);
     const sales = s.sales || [];
@@ -516,18 +522,81 @@ app.get("/api/owner/report", ownerAuth, (req, res) => {
     const expToday = round2((s.expenses || []).filter((e) => e.date.slice(0, 10) === today).reduce((a, e) => a + e.amount, 0));
     const lowCount = products.filter((p) => p.status !== "OK").length;
     const openNotes = (s.notes || []).filter((n) => !n.heard).length;
+    const posChargesToday = round2((s.pos || []).filter((x) => x.date.slice(0, 10) === today).reduce((a, x) => a + x.charge, 0));
     const lastClosing = (s.closings || []).slice(-1)[0] || null;
     const row = { id: s.id, name: s.name, color: s.color,
       todaySales: sum(tSales), todayProfit: tProfit, todayCount: tSales.length, yestSales: sum(ySales),
       owed, debtsToday: tDebts.length, debtsTodayTotal: round2(tDebts.reduce((a, d) => a + d.amount, 0)),
-      expensesToday: expToday, lowCount, openNotes, lastClosing };
+      expensesToday: expToday, lowCount, openNotes, lastClosing, posChargesToday };
     T.todaySales = round2(T.todaySales + row.todaySales); T.todayProfit = round2(T.todayProfit + row.todayProfit);
     T.todayCount += row.todayCount; T.yestSales = round2(T.yestSales + row.yestSales);
     T.owed = round2(T.owed + owed); T.debtsTodayTotal = round2(T.debtsTodayTotal + row.debtsTodayTotal);
     T.expensesToday = round2(T.expensesToday + expToday); T.lowCount += lowCount; T.openNotes += openNotes;
+    T.posChargesToday = round2(T.posChargesToday + posChargesToday);
     return row;
   });
   res.json({ today, stores, totals: T });
+});
+
+// ---------- DAY VIEW: everything that happened on one day ----------
+// ---------- POS (withdraw / transfer agent transactions) ----------
+app.post("/api/stores/:id/pos", storeAuth, async (req, res) => {
+  const type = String(req.body.type || "").toUpperCase();
+  if (type !== "WITHDRAW" && type !== "TRANSFER") return res.status(400).json({ error: "Choose WITHDRAW or TRANSFER." });
+  const amount = Number(req.body.amount);
+  if (!(amount > 0)) return res.status(400).json({ error: "Amount is required." });
+  const charge = Math.max(0, Number(req.body.charge) || 0);
+  const t = { id: uid(), type, amount, charge, total: round2(amount + charge),
+    note: String(req.body.note || "").trim(), worker: String(req.body.worker || "").trim(),
+    date: new Date().toISOString() };
+  req.store.pos = req.store.pos || [];
+  req.store.pos.push(t);
+  await saveDB();
+  res.json({ id: t.id, total: t.total });
+});
+
+app.delete("/api/stores/:id/pos/:pid", ownerAuth, async (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const t = (s.pos || []).find((x) => x.id === req.params.pid);
+  if (!t) return res.status(404).json({ error: "Transaction not found" });
+  const reason = String(req.body.reason || "").trim();
+  if (!reason) return res.status(400).json({ error: "A reason is required (for the corrections log)." });
+  s.corrections = s.corrections || [];
+  s.corrections.push({ id: uid(), type: "POS REMOVED", date: new Date().toISOString(), by: "OWNER", reason,
+    details: t.type + " " + t.amount + " (charge " + t.charge + ") - " + (t.worker || "-") });
+  s.pos = s.pos.filter((x) => x.id !== req.params.pid);
+  await saveDB();
+  res.json({ ok: true });
+});
+
+app.get("/api/stores/:id/day",  (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const isOwner = ownerTokens.has(req.headers["x-owner-token"]);
+  const sid = storeTokens[req.headers["x-store-token"]];
+  if (!isOwner && sid !== s.id) return res.status(401).json({ error: "Login required" });
+  const day = String(req.query.d || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: "Pick a date first." });
+  const sales = (s.sales || []).filter((x) => x.date.slice(0, 10) === day).sort((a, b) => b.date.localeCompare(a.date));
+  const debtsAll = s.debts || [];
+  const debtsAdded = debtsAll.filter((d) => d.date.slice(0, 10) === day);
+  const debtsPaid = debtsAll.filter((d) => d.paid && (d.paidDate || "").slice(0, 10) === day);
+  const expenses = (s.expenses || []).filter((e) => e.date.slice(0, 10) === day);
+  const closings = (s.closings || []).filter((c) => c.day === day);
+  const corrections = isOwner ? (s.corrections || []).filter((c) => c.date.slice(0, 10) === day) : [];
+  const pos = (s.pos || []).filter((x) => x.date.slice(0, 10) === day).sort((a, b) => b.date.localeCompare(a.date));
+  const posCash = round2(pos.reduce((a, x) => a + (x.type === "TRANSFER" ? x.total : -x.amount), 0));
+  const posCharges = round2(pos.reduce((a, x) => a + x.charge, 0));
+  const saleProfit = (x) => (x.profit !== undefined ? x.profit : round2(x.amount - (x.qty || 0) * (x.costPrice || 0)));
+  res.json({ day, sales, debtsAdded, debtsPaid, expenses, closings, corrections, pos,
+    totals: {
+      posCharges, posCash,
+      money: round2(sales.reduce((a, x) => a + x.amount, 0)),
+      profit: round2(sales.reduce((a, x) => a + saleProfit(x), 0)),
+      expensesTotal: round2(expenses.reduce((a, e) => a + e.amount, 0)),
+      debtsAddedTotal: round2(debtsAdded.reduce((a, d) => a + d.amount, 0)),
+      debtsPaidTotal: round2(debtsPaid.reduce((a, d) => a + d.amount, 0)) } });
 });
 
 app.get("/", (req, res) => res.send("CNUO API running - debts, expenses, closing, sales, stock"));
