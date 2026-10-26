@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v22 =====
+// ===== MY STORES MANAGER — FRONTEND v24 =====
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
 let API = localStorage.getItem("apiUrl") || "";
@@ -305,12 +305,24 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (iso) => { const d = new Date(iso);
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+const smartDate = (iso) => {
+  const d = new Date(iso);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const that = new Date(d); that.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - that) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  if (diff > 1 && diff < 7) return d.toLocaleDateString(undefined, { weekday: "long" });
+  return d.toLocaleDateString();
+};
+const smartTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const smartDateTime = (iso) => smartDate(iso) + " " + smartTime(iso);
 const dayDate = (iso) => new Date(iso).toLocaleDateString();
 const sellerName = (id) => localStorage.getItem("seller_" + id) || "";
 const val = (x) => ((document.getElementById(x) || {}).value ?? "");
 
 const purchaseLine = (p) => (p.purchases || [])
-  .map((b) => `${dayDate(b.date)}: ${fmtQty(b.qty)} @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}`)
+  .map((b) => `${smartDate(b.date)}: ${fmtQty(b.qty)} @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}`)
   .join(" · ");
 
 async function api(path, opts = {}) {
@@ -648,7 +660,7 @@ async function renderStore(id, tab = "sale", msg = "") {
   const productRow = (p, ownerView) => `<tr>
     <td>${photoCell(p)}</td>
     <td><b>${esc(p.name)}</b><br>
-      <span class="small">added: ${p.createdAt ? dayDate(p.createdAt) : "—"} · cost: ${money(p.costPrice)}</span><br>
+      <span class="small">added: ${p.createdAt ? smartDate(p.createdAt) : "—"} · cost: ${money(p.costPrice)}</span><br>
       <span class="small" style="color:#555">📥 ${purchaseLine(p) || "no purchase records"}</span></td>
     <td>${fmtQty(p.qtyArrived)}</td><td>${fmtQty(p.sold)}</td><td><b>${fmtQty(p.remaining)}</b></td>
     <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
@@ -659,7 +671,7 @@ async function renderStore(id, tab = "sale", msg = "") {
   const cached = getCachedPhoto(editingProduct || "");
   const editForm = (p) => `<div class="card" style="border:2px solid #1F4E79">
     <h2>✏️ Edit: ${esc(p.name)}</h2>
-    <p class="small">Created on <b>${p.createdAt ? dayDate(p.createdAt) : "—"}</b> — this date never changes.</p>
+    <p class="small">Created on <b>${p.createdAt ? smartDate(p.createdAt) : "—"}</b> — this date never changes.</p>
     <div id="editMsg"></div>
     <label>Product name</label><input id="eName" list="dl-products" value="${esc(p.name)}" />
     <label>Sell price</label><input id="eSell" type="number" min="0" step="any" value="${p.sellPrice}" />
@@ -705,6 +717,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="stat"><div class="num">${money(tMoney)}</div><div class="lbl">Today's money</div></div>
         <div class="stat"><div class="num">${money(tProfit)}</div><div class="lbl">Today's profit</div></div>
         <div class="stat"><div class="num">${tSales.length}</div><div class="lbl">Today's sales</div></div>
+        <div class="stat"><div class="num">${money(d.posChargesToday || 0)}</div><div class="lbl">💳 POS charges</div></div>
       </div>
 
       <div class="tabs">
@@ -713,6 +726,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "log" ? "active" : ""}" onclick="renderStore('${id}','log')">📋 Sales log</div>
         <div class="tab ${tab === "debts" ? "active" : ""}" onclick="renderStore('${id}','debts')">🧾 Debts</div>
         <div class="tab ${tab === "close" ? "active" : ""}" onclick="renderStore('${id}','close')">🔒 Close day</div>
+        <div class="tab ${tab === "day" ? "active" : ""}" onclick="renderStore('${id}','day')">📅 Day view</div>
+        <div class="tab ${tab === "pos" ? "active" : ""}" onclick="renderStore('${id}','pos')">💳 POS</div>
         <div class="tab ${tab === "notes" ? "active" : ""}" onclick="renderStore('${id}','notes')">📣 Notes</div>
         ${d.isOwner ? `<div class="tab ${tab === "customers" ? "active" : ""}" onclick="renderStore('${id}','customers')">👗 Customers</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
@@ -776,7 +791,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div style="overflow-x:auto"><table>
           <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th>${d.isOwner ? "<th></th>" : ""}</tr>
           ${d.sales.map((s) => `<tr>
-            <td class="small">${fmtDate(s.date)}</td><td>${esc(s.productName)}</td>
+            <td class="small">${smartDateTime(s.date)}</td><td>${esc(s.productName)}</td>
             <td>${fmtQty(s.qty)}</td><td>${money(s.amount)}</td>
             <td style="color:#2e7d32"><b>${money(s.amount - s.qty * (s.costPrice || 0))}</b></td>
             <td>${esc(s.worker || "—")}</td>
@@ -801,7 +816,7 @@ async function renderStore(id, tab = "sale", msg = "") {
           ${d.debts.map((x) => `<tr>
             <td><b>${esc(x.customer)}</b></td><td>${money(x.amount)}</td>
             <td class="small">${esc(x.note || "—")}</td>
-            <td class="small">${fmtDate(x.date)}</td><td>${esc(x.worker || "—")}</td>
+            <td class="small">${smartDateTime(x.date)}</td><td>${esc(x.worker || "—")}</td>
             <td><button class="btn btn-green" onclick="doPayDebt('${id}','${x.id}')">✅ Paid</button>
             ${d.isOwner ? `<button class="btn btn-red" onclick="doDeleteDebt('${id}','${x.id}')">✕</button>` : ""}</td>
           </tr>`).join("")}
@@ -811,7 +826,7 @@ async function renderStore(id, tab = "sale", msg = "") {
           <tr><th>Customer</th><th>Amount</th><th>Paid on</th><th></th></tr>
           ${d.debtsPaid.slice(0, 20).map((x) => `<tr>
             <td>${esc(x.customer)}</td><td>${money(x.amount)}</td>
-            <td class="small">${x.paidDate ? fmtDate(x.paidDate) : "—"} by ${esc(x.paidBy || "—")}</td>
+            <td class="small">${x.paidDate ? smartDateTime(x.paidDate) : "—"} by ${esc(x.paidBy || "—")}</td>
             <td><button class="btn btn-red" onclick="doDeleteDebt('${id}','${x.id}')">✕</button></td>
           </tr>`).join("")}
         </table></div>` : ""}
@@ -828,7 +843,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div style="overflow-x:auto"><table>
           <tr><th>Date</th><th>Expected</th><th>Counted</th><th>Difference</th><th>By</th></tr>
           ${d.closings.map((c) => `<tr>
-            <td class="small">${c.day}</td><td>${money(c.expected)}</td><td>${money(c.counted)}</td>
+            <td class="small">${smartDate(c.day + "T12:00:00")}</td><td>${money(c.expected)}</td><td>${money(c.counted)}</td>
             <td style="color:${c.difference === 0 ? "#2e7d32" : "#c62828"};font-weight:700">${money(c.difference)}</td>
             <td>${esc(c.worker || "—")}</td>
           </tr>`).join("")}
@@ -868,7 +883,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div style="overflow-x:auto"><table>
           <tr><th>Date</th><th>Message</th><th>From</th><th></th></tr>
           ${d.notes.map((n) => `<tr style="${n.heard ? "opacity:0.55" : ""}">
-            <td class="small">${fmtDate(n.date)}</td>
+            <td class="small">${smartDateTime(n.date)}</td>
             <td><b>${esc(n.text)}</b>${n.heard ? `<br><span class="small">✔ reviewed</span>` : ""}</td>
             <td>${esc(n.worker || "—")}</td>
             <td>${n.heard ? "" : `<button class="btn btn-green" onclick="doMarkNote('${id}','${n.id}')">✔ Done</button>`}
@@ -905,13 +920,54 @@ async function renderStore(id, tab = "sale", msg = "") {
         </table></div>`}
       </div></div>` : ""}
 
+      <div class="section ${tab === "day" ? "active" : ""}"><div class="card">
+        <h2>📅 Day view — everything that happened</h2>
+        <label>Pick a date</label>
+        <input type="date" id="dayInput" value="${new Date().toISOString().slice(0, 10)}" onchange="loadDay('${id}')" />
+        <div id="dayResults"></div>
+      </div></div>
+
+      <div class="section ${tab === "pos" ? "active" : ""}"><div class="card">
+        <h2>💳 POS transactions</h2>
+        <p class="small"><b>WITHDRAW</b> = you give the person cash. <b>TRANSFER</b> = the person gives you cash, you send to their account.</p>
+        <div id="posMsg"></div>
+        <label>Type</label>
+        <select id="posType" onchange="posPreview()">
+          <option value="WITHDRAW">WITHDRAW — give cash</option>
+          <option value="TRANSFER">TRANSFER — receive cash, send to account</option>
+        </select>
+        <label>Amount (the person's money)</label>
+        <input id="posAmount" type="number" min="1" step="any" oninput="posPreview()" />
+        <label>Charge (your fee)</label>
+        <input id="posCharge" type="number" min="0" step="any" value="0" oninput="posPreview()" />
+        <div id="posPreview" class="small" style="background:#e8f0fe;padding:10px;border-radius:8px;margin:6px 0">Type the amount to see the calculation.</div>
+        <label>Note (optional — customer name / account)</label>
+        <input id="posNote" placeholder="e.g. Mama B / GTB" />
+        <button class="btn btn-primary btn-block" onclick="doAddPos('${id}')">💳 Save transaction</button>
+        <hr style="margin:14px 0">
+        <p><b>POS charges today: ${money(d.posChargesToday || 0)}</b> · All-time charges: ${money(d.posChargesAll || 0)}</p>
+        ${(d.posToday || []).length === 0 ? "<p>No POS transactions today.</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Time</th><th>Type</th><th>Amount</th><th>Charge</th><th>Note</th><th>By</th><th></th></tr>
+          ${d.posToday.map((x) => `<tr>
+            <td class="small">${smartTime(x.date)}</td>
+            <td><b>${x.type === "WITHDRAW" ? "💸 Withdraw" : "💰 Transfer"}</b></td>
+            <td>${money(x.amount)}</td>
+            <td style="color:#2e7d32"><b>${money(x.charge)}</b></td>
+            <td class="small">${esc(x.note || "—")}</td>
+            <td>${esc(x.worker || "—")}</td>
+            <td>${d.isOwner ? `<button class="btn btn-red" onclick="doDeletePos('${id}','${x.id}')">✕</button>` : ""}</td>
+          </tr>`).join("")}
+        </table></div>`}
+      </div></div>
+
       ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
         <h2>🛠 Corrections log (owner only)</h2>
         ${(d.corrections || []).length === 0 ? "<p>No corrections yet. ✅</p>" : `
         <div style="overflow-x:auto"><table>
           <tr><th>Date & time</th><th>Action</th><th>Details</th><th>Reason</th><th>By</th></tr>
           ${(d.corrections || []).map((c) => `<tr>
-            <td class="small">${fmtDate(c.date)}</td>
+            <td class="small">${smartDateTime(c.date)}</td>
             <td><b>${esc(c.type)}</b></td>
             <td class="small">${esc(c.details || "")}</td>
             <td>${esc(c.reason)}</td>
@@ -942,6 +998,8 @@ async function renderStore(id, tab = "sale", msg = "") {
     </div>`;
 
   updateOutboxBadge();
+  if (tab === "day") setTimeout(() => loadDay(id), 60);
+  if (tab === "pos") setTimeout(posPreview, 60);
   renderSalePicker(d.products);
   if (d.products.some((p) => p.hasPhoto)) ensurePhotos(id, d.photosAt || 0);
 }
@@ -1171,6 +1229,105 @@ async function doClosing(id) {
   } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 
+// ---------- POS ----------
+function posPreview() {
+  const box = document.getElementById("posPreview");
+  if (!box) return;
+  const a = Number(val("posAmount") || 0);
+  const c = Number(val("posCharge") || 0);
+  const type = val("posType");
+  if (!a) { box.textContent = "Type the amount to see the calculation."; return; }
+  box.innerHTML = type === "WITHDRAW"
+    ? `You give <b>${money(a)}</b> cash to the customer · customer pays you <b>${money(a + c)}</b> · <b style="color:#2e7d32">you earn ${money(c)}</b><br><span class="small">Drawer: -${money(a)} cash</span>`
+    : `Customer gives you <b>${money(a + c)}</b> cash · you transfer <b>${money(a)}</b> to their account · <b style="color:#2e7d32">you earn ${money(c)}</b><br><span class="small">Drawer: +${money(a + c)} cash</span>`;
+}
+async function doAddPos(id) {
+  try {
+    const r = await submitWrite(`/api/stores/${id}/pos`, "POST", {
+      type: val("posType"), amount: Number(val("posAmount")),
+      charge: Number(val("posCharge") || 0), note: val("posNote"), worker: sellerName(id) });
+    renderStore(id, "pos", r.queued ? `📶 No network — saved on this phone (${outbox.length} queued).` : `💳 POS saved — total ${money(r.total || 0)} ✅`);
+  } catch (e) { document.getElementById("posMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doDeletePos(id, pid) {
+  const reason = prompt("Why are you removing this POS entry? (recorded in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this POS entry?")) return;
+  try {
+    await api(`/api/stores/${id}/pos/${pid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "pos", "POS entry removed ✅");
+  } catch (e) { alert(e.message); }
+}
+
+// ---------- DAY VIEW ----------
+async function loadDay(id) {
+  const box = document.getElementById("dayResults");
+  if (!box) return;
+  const d = (document.getElementById("dayInput") || {}).value;
+  if (!d) { box.innerHTML = "<p>Pick a date.</p>"; return; }
+  box.innerHTML = '<p class="small">Loading...</p>';
+  let r;
+  try { r = await api(`/api/stores/${id}/day?d=${d}`); }
+  catch (e) { box.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; return; }
+  const t = r.totals;
+  const nothing = !r.sales.length && !r.debtsAdded.length && !r.debtsPaid.length && !r.expenses.length && !r.closings.length && !r.corrections.length && !(r.pos || []).length;
+  let h = `<h3 style="margin-top:14px">${esc(smartDate(r.day + "T12:00:00"))} — summary</h3>
+    <div class="stat-row">
+      <div class="stat"><div class="num">${money(t.money)}</div><div class="lbl">Money in</div></div>
+      <div class="stat"><div class="num">${money(t.profit)}</div><div class="lbl">Profit</div></div>
+      <div class="stat"><div class="num">${money(t.expensesTotal)}</div><div class="lbl">Expenses</div></div>
+      <div class="stat"><div class="num">${r.sales.length}</div><div class="lbl">Sales</div></div>
+    </div>`;
+  if (nothing) { h += "<p>Nothing was recorded on this day.</p>"; box.innerHTML = h; return; }
+  if (r.sales.length) h += `<h3 style="margin-top:12px">Sales (${r.sales.length})</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th></tr>
+      ${r.sales.map((s) => `<tr><td class="small">${smartTime(s.date)}</td><td>${esc(s.productName)}</td>
+        <td>${fmtQty(s.qty)}</td><td>${money(s.amount)}</td>
+        <td style="color:${(s.amount - s.qty * (s.costPrice || 0)) >= 0 ? "#2e7d32" : "#c62828"}"><b>${money(s.amount - s.qty * (s.costPrice || 0))}</b></td>
+        <td>${esc(s.worker || "—")}</td></tr>`).join("")}
+    </table></div>`;
+  if (r.debtsAdded.length) h += `<h3 style="margin-top:12px">🧾 Debts added (${money(t.debtsAddedTotal)})</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Customer</th><th>Amount</th><th>Note</th><th>By</th></tr>
+      ${r.debtsAdded.map((x) => `<tr><td><b>${esc(x.customer)}</b></td><td>${money(x.amount)}</td>
+        <td class="small">${esc(x.note || "—")}</td><td>${esc(x.worker || "—")}</td></tr>`).join("")}
+    </table></div>`;
+  if (r.debtsPaid.length) h += `<h3 style="margin-top:12px">✅ Debts paid (${money(t.debtsPaidTotal)})</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Customer</th><th>Amount</th><th>Paid by</th></tr>
+      ${r.debtsPaid.map((x) => `<tr><td>${esc(x.customer)}</td><td>${money(x.amount)}</td><td>${esc(x.paidBy || "—")}</td></tr>`).join("")}
+    </table></div>`;
+  if (r.expenses.length) h += `<h3 style="margin-top:12px">💸 Expenses (${money(t.expensesTotal)})</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Reason</th><th>Amount</th></tr>
+      ${r.expenses.map((e) => `<tr><td>${esc(e.reason)}</td><td>${money(e.amount)}</td></tr>`).join("")}
+    </table></div>`;
+  if ((r.pos || []).length) h += `<h3 style="margin-top:12px">💳 POS (${money(r.totals.posCharges)} charges · cash impact ${money(r.totals.posCash)})</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Time</th><th>Type</th><th>Amount</th><th>Charge</th><th>Note</th><th>By</th></tr>
+      ${r.pos.map((x) => `<tr><td class="small">${smartTime(x.date)}</td>
+        <td><b>${x.type === "WITHDRAW" ? "💸 Withdraw" : "💰 Transfer"}</b></td>
+        <td>${money(x.amount)}</td><td style="color:#2e7d32"><b>${money(x.charge)}</b></td>
+        <td class="small">${esc(x.note || "—")}</td><td>${esc(x.worker || "—")}</td></tr>`).join("")}
+    </table></div>`;
+  if (r.closings.length) h += `<h3 style="margin-top:12px">🔒 Closing</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Expected</th><th>Counted</th><th>Difference</th><th>By</th></tr>
+      ${r.closings.map((c) => `<tr><td>${money(c.expected)}</td><td>${money(c.counted)}</td>
+        <td style="color:${c.difference === 0 ? "#2e7d32" : "#c62828"};font-weight:700">${money(c.difference)}</td>
+        <td>${esc(c.worker || "—")}</td></tr>`).join("")}
+    </table></div>`;
+  if (r.corrections.length) h += `<h3 style="margin-top:12px">🛠 Corrections (owner only)</h3>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Time</th><th>Action</th><th>Details</th><th>Reason</th></tr>
+      ${r.corrections.map((c) => `<tr><td class="small">${smartTime(c.date)}</td><td><b>${esc(c.type)}</b></td>
+        <td class="small">${esc(c.details || "")}</td><td>${esc(c.reason)}</td></tr>`).join("")}
+    </table></div>`;
+  box.innerHTML = h;
+}
+
 // ---------- NOTES / CUSTOMERS / OWNER REPORT ----------
 async function doAddNote(id) {
   try {
@@ -1238,6 +1395,7 @@ async function renderReport() {
           💸 Expenses today: ${money(s.expensesToday)} ·
           ${s.lowCount ? `<span style="color:#c62828">⚠️ ${s.lowCount} low/finished</span> · ` : ""}
           ${s.openNotes ? `<span style="color:#c62828">📣 ${s.openNotes} unread note(s)</span> · ` : ""}
+          💳 POS charges today: <b>${money(s.posChargesToday || 0)}</b> ·
           ${s.lastClosing ? `🔒 Last closing: counted ${money(s.lastClosing.counted)} vs ${money(s.lastClosing.expected)} → <b style="color:${s.lastClosing.difference === 0 ? "#2e7d32" : "#c62828"}">${money(s.lastClosing.difference)}</b>` : "🔒 No closing yet"}
         </p>
       </div>`).join("")}
