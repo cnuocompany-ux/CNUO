@@ -1,5 +1,5 @@
 // ===== MY STORES MANAGER — BACKEND v20 =====
-// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS
+// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -664,6 +664,33 @@ app.delete("/api/stores/:id/handovers/:hid", ownerAuth, async (req, res) => {
   s.handovers = s.handovers.filter((x) => x.id !== req.params.hid);
   await saveDB();
   res.json({ ok: true });
+});
+
+// ---------- CALIBRATE: "how much do I have right now?" — no history needed ----------
+app.put("/api/stores/:id/calibrate", ownerAuth, async (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const cash = Number(req.body.cash), bank = Number(req.body.bank);
+  if (!(cash >= 0) || isNaN(cash) || !(bank >= 0) || isNaN(bank))
+    return res.status(400).json({ error: "Type both amounts (0 is allowed)." });
+  const now = new Date().toISOString();
+  const before = (arr, val) => round2((arr || []).filter((x) => (x.date || "") <= now).reduce((a, x) => a + val(x), 0));
+  const salesB = before(s.sales, (x) => x.amount);
+  const repayB = before((s.debts || []).filter((d) => d.paid), (x) => x.amount);
+  const posCashInB = before((s.pos || []).filter((x) => x.type === "TRANSFER"), (x) => x.total);
+  const posCashOutB = before((s.pos || []).filter((x) => x.type === "WITHDRAW"), (x) => x.amount);
+  const expB = before(s.expenses, (x) => x.amount);
+  const hoB = before(s.handovers, (x) => x.amount);
+  let spentB = 0;
+  for (const p of s.products || []) for (const b of (p.purchases || [])) if ((b.date || "") <= now) spentB += (b.qty || 0) * (b.costPrice || 0);
+  const bankInB = before((s.pos || []).filter((x) => x.type === "WITHDRAW"), (x) => x.total);
+  const bankOutB = before((s.pos || []).filter((x) => x.type === "TRANSFER"), (x) => x.amount);
+  s.openingCash = round2(cash - (salesB + repayB + posCashInB - posCashOutB - expB - spentB - hoB));
+  s.openingBank = round2(bank - (bankInB - bankOutB));
+  s.cashOpening = round2(s.openingCash + s.openingBank);
+  s.calibratedAt = now;
+  await saveDB();
+  res.json({ ok: true, openingCash: s.openingCash, openingBank: s.openingBank });
 });
 
 app.get("/", (req, res) => res.send("CNUO API running - CNUO Stores Manager"));
