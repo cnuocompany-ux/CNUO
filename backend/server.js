@@ -1,5 +1,5 @@
 // ===== MY STORES MANAGER — BACKEND v20 =====
-// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS
+// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -189,10 +189,36 @@ app.get("/api/stores/:id", (req, res) => {
   const owedTotal = round2(unpaid.reduce((a, d) => a + d.amount, 0));
   const expenses = s.expenses || [];
   const expensesTotal = round2(expenses.reduce((a, x) => a + x.amount, 0));
+  // ===== MONEY POSITION: cash drawer bucket + POS/bank bucket =====
+  const posCashIn = round2((s.pos || []).filter((x) => x.type === "TRANSFER").reduce((a, x) => a + x.total, 0));
+  const posCashOut = round2((s.pos || []).filter((x) => x.type === "WITHDRAW").reduce((a, x) => a + x.amount, 0));
+  const posBankIn = round2((s.pos || []).filter((x) => x.type === "WITHDRAW").reduce((a, x) => a + x.total, 0));
+  const posBankOut = round2((s.pos || []).filter((x) => x.type === "TRANSFER").reduce((a, x) => a + x.amount, 0));
+  const debtsPaidTotal = round2((s.debts || []).filter((d) => d.paid).reduce((a, d) => a + d.amount, 0));
+  const handovers = (s.handovers || []).slice().reverse();
+  const handoversTotal = round2((s.handovers || []).reduce((a, h) => a + h.amount, 0));
+  const lastHandover = (s.handovers || []).slice(-1)[0] || null;
+  const openingCash = (s.openingCash === undefined || s.openingCash === null) ? ((s.cashOpening === undefined || s.cashOpening === null) ? null : round2(s.cashOpening)) : round2(s.openingCash);
+  const openingBank = (s.openingBank === undefined || s.openingBank === null) ? null : round2(s.openingBank);
+  // Drawer: opening + cash sales + debt repayments + POS transfer cash in - POS withdraw cash out - expenses - goods - handovers
+  const drawerCash = openingCash === null ? null : round2(openingCash + totalIn + debtsPaidTotal + posCashIn - posCashOut - expensesTotal - spent - handoversTotal);
+  // Bank/POS: opening + withdraw money in - transfer money out
+  const bankCash = openingBank === null ? null : round2(openingBank + posBankIn - posBankOut);
+  const grandTotal = (drawerCash === null || bankCash === null) ? null : round2(drawerCash + bankCash);
+  // staff possession since last handover
+  const since = lastHandover ? lastHandover.date : "0000";
+  const flowSum = (arr, val) => round2((arr || []).filter((x) => x.date > since).reduce((a, x) => a + val(x), 0));
+  const staffPossession = round2(
+    flowSum(s.sales, (x) => x.amount) + flowSum(s.pos, (x) => (x.type === "TRANSFER" ? x.total : -x.amount)) - flowSum(s.expenses, (x) => x.amount));
   res.json({
     id: s.id, name: s.name, registeredName: s.registeredName, color: s.color,
     lowStock: s.lowStock ?? db.lowStockDefault,
     photosAt: s.photosAt || 0,
+    cashOpening: openingCash, cashNow: grandTotal, openingCash, openingBank,
+    drawerCash, bankCash, grandTotal, handovers, lastHandover, staffPossession,
+    cashInTotal: round2(totalIn + debtsPaidTotal + posCashIn),
+    cashOutTotal: round2(expensesTotal + spent + posCashOut + handoversTotal),
+    posCashNet: round2(posCashIn - posCashOut),
     isOwner, products, sales: s.sales.slice().reverse(),
     corrections: isOwner ? (s.corrections || []).slice().reverse() : [],
     debts: unpaid, debtsPaid: paidDebts, owedTotal,
@@ -599,7 +625,48 @@ app.get("/api/stores/:id/day",  (req, res) => {
       debtsPaidTotal: round2(debtsPaid.reduce((a, d) => a + d.amount, 0)) } });
 });
 
-app.get("/", (req, res) => res.send("CNUO API running - debts, expenses, closing, sales, stock"));
+// ---------- OPENING BALANCES + HANDOVERS ----------
+app.put("/api/stores/:id/opening", ownerAuth, async (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const cash = Number(req.body.cash), bank = Number(req.body.bank);
+  if (!(cash >= 0) || isNaN(cash) || !(bank >= 0) || isNaN(bank))
+    return res.status(400).json({ error: "Type both amounts (0 is allowed)." });
+  s.openingCash = round2(cash);
+  s.openingBank = round2(bank);
+  s.cashOpening = round2(cash + bank); // legacy mirror
+  await saveDB();
+  res.json({ ok: true });
+});
+
+// staff gives money to owner — leaves staff possession, dated
+app.post("/api/stores/:id/handovers", storeAuth, async (req, res) => {
+  const amount = Number(req.body.amount);
+  if (!(amount > 0)) return res.status(400).json({ error: "Amount given to owner is required." });
+  const h = { id: uid(), amount, note: String(req.body.note || "").trim(),
+    worker: String(req.body.worker || "").trim(), date: new Date().toISOString() };
+  req.store.handovers = req.store.handovers || [];
+  req.store.handovers.push(h);
+  await saveDB();
+  res.json({ id: h.id });
+});
+
+app.delete("/api/stores/:id/handovers/:hid", ownerAuth, async (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const h = (s.handovers || []).find((x) => x.id === req.params.hid);
+  if (!h) return res.status(404).json({ error: "Handover not found" });
+  const reason = String(req.body.reason || "").trim();
+  if (!reason) return res.status(400).json({ error: "A reason is required (for the corrections log)." });
+  s.corrections = s.corrections || [];
+  s.corrections.push({ id: uid(), type: "HANDOVER REMOVED", date: new Date().toISOString(), by: "OWNER", reason,
+    details: h.worker + " gave " + h.amount + " to owner on " + h.date });
+  s.handovers = s.handovers.filter((x) => x.id !== req.params.hid);
+  await saveDB();
+  res.json({ ok: true });
+});
+
+app.get("/", (req, res) => res.send("CNUO API running - CNUO Stores Manager"));
 
 // ---------- START ----------
 let db;
