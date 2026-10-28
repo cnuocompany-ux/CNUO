@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v28 =====
+// ===== MY STORES MANAGER — FRONTEND v31 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -56,6 +56,9 @@ setInterval(() => { if (outbox.length) syncOutbox(); }, 30000);
 const storeCache = {};
 try { for (const k in localStorage) { if (k.indexOf("cnuo_cache_") === 0) { try { storeCache[k.replace("cnuo_cache_", "")] = JSON.parse(localStorage[k]); } catch (e) {} } } } catch (e) {}
 let salePicker = { products: [], selected: null };
+let lastRev = null;
+let currentTab = "sale";
+let refreshTimer = null;
 const VOICE_SUPPORTED = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 let assistantActive = false;
 const ASSISTANT_NAME = "Amara"; // \u{270F}\u{FE0F} change her name here if you like
@@ -647,12 +650,15 @@ async function doStoreLogin(id) {
   } catch (e) { document.getElementById("slMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 function clearStoreLogin() { storeToken = ""; storeId = "";
-  localStorage.removeItem("storeToken"); localStorage.removeItem("storeId"); }
+  localStorage.removeItem("storeToken"); localStorage.removeItem("storeId");
+  clearInterval(refreshTimer); }
 
 async function renderStore(id, tab = "sale", msg = "") {
+  currentTab = tab;
   let d, offline = false;
   try {
     d = await api(`/api/stores/${id}`);
+    lastRev = d.rev;
     storeCache[id] = d;
     try { localStorage.setItem("cnuo_cache_" + id, JSON.stringify(d)); } catch (e) {}
     setTimeout(syncOutbox, 300);
@@ -729,12 +735,11 @@ async function renderStore(id, tab = "sale", msg = "") {
         <h2>💰 Money position (automatic)</h2>
         ${(d.grandTotal !== null && d.grandTotal !== undefined) ? `
           <div class="stat-row" style="margin:6px 0">
-            <div class="stat"><div class="num">${money(d.drawerCash)}</div><div class="lbl">💵 Cash in drawer</div></div>
-            <div class="stat"><div class="num">${money(d.bankCash)}</div><div class="lbl">🏦 POS / bank</div></div>
+            <div class="stat"><div class="num">${money(d.drawerCash)}</div><div class="lbl">💵 Cash in drawer (physically with staff)</div></div>
+            <div class="stat"><div class="num">${money(d.bankCash)}</div><div class="lbl">🏦 POS / bank (business account)</div></div>
             <div class="stat"><div class="num" style="color:#2e7d32">${money(d.grandTotal)}</div><div class="lbl">💰 TOTAL NOW</div></div>
           </div>
           <p class="small">Automatically = opening + all received (${money(d.cashInTotal)}) − all paid out (${money(d.cashOutTotal)})</p>
-          <p class="small">🤝 Staff currently holding: <b>${money(d.staffPossession || 0)}</b>${d.lastHandover ? ` — counted since last handover: ${smartDateTime(d.lastHandover.date)}` : " — no handover yet (counting all)"}</p>
           <p class="small">Also: 📦 stock ${money(d.totals.stockValue)} · 🧾 owed to you ${money(d.owedTotal)}</p>
           <p style="margin-top:6px;padding:10px;background:#e8f5e9;border-radius:8px">🌍 <b>EVERYTHING YOU OWN = ${money((d.grandTotal || 0) + (d.totals.stockValue || 0) + (d.owedTotal || 0))}</b><br><span class="small">cash + bank + all goods + every debt owed to you</span></p>
           ${d.isOwner ? `<button class="btn btn-gray" onclick="doRecalibrate('${id}')">↺ Re-count & recalibrate</button>` : ""}`
@@ -744,6 +749,8 @@ async function renderStore(id, tab = "sale", msg = "") {
           <label>🏦 Money in POS / bank now</label><input id="openBank" type="number" min="0" step="any" placeholder="Check bank app and type it" />
           <button class="btn btn-green btn-block" onclick="doSetOpening('${id}')">💰 This is what I have now</button>`}
       </div>
+
+      ${d.isOwner ? `<div id="auditBox"></div>` : ""}
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
       <div class="stat-row">
@@ -1011,7 +1018,7 @@ async function renderStore(id, tab = "sale", msg = "") {
 
       <div class="section ${tab === "handovers" ? "active" : ""}"><div class="card">
         <h2>🤝 Handover — giving money to the owner</h2>
-        <p class="small">When the staff hands cash to the owner, record it here. That money leaves staff possession (dated), and new selling starts counting separately.</p>
+        <p class="small">When staff hand cash to the owner, record it here — the drawer amount drops by that amount, and the date is kept as your record.</p>
         <div id="hoMsg"></div>
         <label>Amount given to owner</label>
         <input id="hoAmount" type="number" min="1" step="any" />
@@ -1071,6 +1078,23 @@ async function renderStore(id, tab = "sale", msg = "") {
   updateOutboxBadge();
   if (tab === "day") setTimeout(() => loadDay(id), 60);
   if (tab === "pos") setTimeout(posPreview, 60);
+
+  // AUTO-REFRESH: check every 20s; re-render only if data changed,
+  // never while typing, never while Amara is talking, never when tab hidden
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(async () => {
+    if (document.hidden || assistantActive) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
+    try {
+      const d2 = await api(`/api/stores/${id}`);
+      if (lastRev !== null && d2.rev !== lastRev) {
+        const y = window.scrollY;
+        await renderStore(id, currentTab, "", true);
+        window.scrollTo(0, y);
+      } else { lastRev = d2.rev; }
+    } catch (e) {}
+  }, 20000);
   renderSalePicker(d.products);
   if (d.products.some((p) => p.hasPhoto)) ensurePhotos(id, d.photosAt || 0);
 }
@@ -1311,6 +1335,27 @@ async function doClosing(id) {
       : `Closing saved: counted ${money(r.counted)}, expected ${money(r.expected)} — DIFFERENCE ${diff > 0 ? "+" : ""}${money(diff)} (owner notified in history)`;
     renderStore(id, "close", msg);
   } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+
+// ---------- AUDIT: auto mistake detection (owner only) ----------
+async function loadAudit(id) {
+  const box = document.getElementById("auditBox");
+  if (!box) return;
+  let r;
+  try { r = await api(`/api/stores/${id}/audit`); } catch (e) { box.innerHTML = ""; return; }
+  if (!r.count) {
+    box.innerHTML = `<div class="card" style="border:2px solid #2e7d32;margin-top:10px">
+      <h2>🩺 Audit — ALL CLEAR ✅</h2>
+      <p class="small">Checked prices, duplicates, losses, closings, debts. No mistakes detected.</p></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="card" style="border:2px solid #c62828;margin-top:10px">
+    <h2>🩺 Audit — ${r.count} thing(s) to check ⚠️</h2>
+    ${r.findings.map((f) => `<div class="msg ${f.severity === "high" ? "msg-error" : ""}" style="${f.severity === "medium" ? "background:#fff3e0;color:#9c6500" : f.severity === "low" ? "background:#e3f2fd;color:#0d47a1" : ""}">
+      <b>${esc(f.type)}</b> — ${esc(f.message)}<br>
+      <span class="small">${smartDateTime(f.date)} · by ${esc(f.worker || "—")} · <a href="#" onclick="renderStore('${id}','day');return false;" style="color:inherit;text-decoration:underline">check in Day view</a></span>
+    </div>`).join("")}
+  </div>`;
 }
 
 // ---------- MONEY POSITION / CALIBRATE / HANDOVERS ----------
