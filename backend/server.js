@@ -1,5 +1,5 @@
 // ===== MY STORES MANAGER — BACKEND v20 =====
-// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE
+// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE + AUDIT + AUTO-REV
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -74,6 +74,7 @@ async function loadDB() {
 }
 
 async function saveDB() {
+  db.rev = Date.now(); // revision: tells every phone when data changed
   try { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch (e) {}
   if (mongoCol) {
     const doSave = async () => {
@@ -211,6 +212,7 @@ app.get("/api/stores/:id", (req, res) => {
   const staffPossession = round2(
     flowSum(s.sales, (x) => x.amount) + flowSum(s.pos, (x) => (x.type === "TRANSFER" ? x.total : -x.amount)) - flowSum(s.expenses, (x) => x.amount));
   res.json({
+    rev: db.rev || 0,
     id: s.id, name: s.name, registeredName: s.registeredName, color: s.color,
     lowStock: s.lowStock ?? db.lowStockDefault,
     photosAt: s.photosAt || 0,
@@ -691,6 +693,54 @@ app.put("/api/stores/:id/calibrate", ownerAuth, async (req, res) => {
   s.calibratedAt = now;
   await saveDB();
   res.json({ ok: true, openingCash: s.openingCash, openingBank: s.openingBank });
+});
+
+// ---------- AUDIT: auto-detect mistakes, overpayments, leftover money ----------
+app.get("/api/stores/:id/audit", ownerAuth, (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const findings = [];
+  const pmap = {};
+  for (const p of s.products || []) pmap[p.id] = p;
+  const sales = (s.sales || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+  for (const x of sales) {
+    const p = pmap[x.productId];
+    const cost = p ? p.costPrice || 0 : 0;
+    const unit = x.qty ? x.amount / x.qty : x.amount;
+    const profit = x.profit !== undefined ? x.profit : round2(x.amount - x.qty * cost);
+    if (profit < 0)
+      findings.push({ type: "LOSS", severity: "high", id: x.id, date: x.date, worker: x.worker,
+        message: x.productName + " x" + x.qty + " for " + x.amount + " — SOLD BELOW COST (loss " + round2(-profit) + ")" });
+    if (p && p.sellPrice) {
+      if (unit < p.sellPrice * 0.8)
+        findings.push({ type: "UNDERCHARGE", severity: "high", id: x.id, date: x.date, worker: x.worker,
+          message: x.productName + " at " + round2(unit) + "/unit vs set price " + p.sellPrice + " — customer undercharged or typo" });
+      else if (unit > p.sellPrice * 1.5)
+        findings.push({ type: "OVERPAYMENT", severity: "medium", id: x.id, date: x.date, worker: x.worker,
+          message: x.productName + " at " + round2(unit) + "/unit vs set price " + p.sellPrice + " — possible overcharge or extra zero" });
+    }
+  }
+  for (let i = 1; i < sales.length; i++) {
+    const a = sales[i - 1], b = sales[i];
+    if (a.productId === b.productId && a.qty === b.qty && a.worker && a.worker === b.worker
+        && (new Date(b.date) - new Date(a.date)) < 120000)
+      findings.push({ type: "DOUBLE-TAP", severity: "high", id: b.id, date: b.date, worker: b.worker,
+        message: "Two identical entries: " + b.productName + " x" + b.qty + " twice within 2 minutes — was one a mistake?" });
+  }
+  for (const c of (s.closings || [])) {
+    if (c.difference !== 0)
+      findings.push({ type: "CLOSING_GAP", severity: c.difference < 0 ? "high" : "medium", id: c.id, date: c.date, worker: c.worker,
+        message: "Closing " + c.day + ": counted " + c.counted + " vs expected " + c.expected + " — "
+          + (c.difference < 0 ? "MONEY SHORT by " + round2(-c.difference) : "MONEY LEFT OVER +" + round2(c.difference)) });
+  }
+  const now = Date.now();
+  for (const d of (s.debts || []).filter((d) => !d.paid)) {
+    if (now - new Date(d.date).getTime() > 7 * 86400000)
+      findings.push({ type: "OLD_DEBT", severity: "low", id: d.id, date: d.date, worker: d.worker,
+        message: d.customer + " owes " + d.amount + " for more than 7 days" });
+  }
+  findings.sort((a, b) => b.date.localeCompare(a.date));
+  res.json({ count: findings.length, findings: findings.slice(0, 50) });
 });
 
 app.get("/", (req, res) => res.send("CNUO API running - CNUO Stores Manager"));
