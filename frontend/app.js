@@ -1,4 +1,5 @@
-// ===== MY STORES MANAGER — FRONTEND v24 =====
+// ===== MY STORES MANAGER — FRONTEND v27 =====
+// v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
 let API = localStorage.getItem("apiUrl") || "";
@@ -357,6 +358,32 @@ function getCachedPhoto(pid) {
   return "";
 }
 
+// shrink photos ON the phone before upload (5MB camera photo -> ~60KB)
+function processImage(file) {
+  return new Promise((resolve) => {
+    if (!file) return resolve("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const max = 512;
+          let w = img.width, h = img.height;
+          if (w > max || h > max) { const k = max / Math.max(w, h); w = Math.round(w * k); h = Math.round(h * k); }
+          const cv = document.createElement("canvas");
+          cv.width = w; cv.height = h;
+          cv.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(cv.toDataURL("image/jpeg", 0.72));
+        } catch (e) { resolve(reader.result); }
+      };
+      img.onerror = () => resolve(reader.result);
+      img.src = reader.result;
+    };
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(file);
+  });
+}
+
 // ================= VOICE + SPEECH PARSING =================
 const NUMWORDS = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
   ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
@@ -698,6 +725,25 @@ async function renderStore(id, tab = "sale", msg = "") {
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
 
+      <div class="card" style="border:2px solid ${(d.grandTotal !== null && d.grandTotal !== undefined) ? "#2e7d32" : "#f0ad4e"};margin-top:10px">
+        <h2>💰 Money position (automatic)</h2>
+        ${(d.grandTotal !== null && d.grandTotal !== undefined) ? `
+          <div class="stat-row" style="margin:6px 0">
+            <div class="stat"><div class="num">${money(d.drawerCash)}</div><div class="lbl">💵 Cash in drawer</div></div>
+            <div class="stat"><div class="num">${money(d.bankCash)}</div><div class="lbl">🏦 POS / bank</div></div>
+            <div class="stat"><div class="num" style="color:#2e7d32">${money(d.grandTotal)}</div><div class="lbl">💰 TOTAL NOW</div></div>
+          </div>
+          <p class="small">Automatically = opening + all received (${money(d.cashInTotal)}) − all paid out (${money(d.cashOutTotal)})</p>
+          <p class="small">🤝 Staff currently holding: <b>${money(d.staffPossession || 0)}</b>${d.lastHandover ? ` — counted since last handover: ${smartDateTime(d.lastHandover.date)}` : " — no handover yet (counting all)"}</p>
+          <p class="small">Not cash yet: 📦 stock ${money(d.totals.stockValue)} · 🧾 owed to you ${money(d.owedTotal)}</p>
+          ${d.isOwner ? `<button class="btn btn-gray" onclick="doUpdateOpening('${id}', ${d.openingCash}, ${d.openingBank})">↺ Update opening amounts</button>` : ""}`
+        : `
+          <p class="small"><b>One-time setup:</b> how much was in your <b>cash drawer</b> and in your <b>POS/bank account</b> on the day you started using this app? Everything after that is calculated automatically, forever.</p>
+          <label>Cash in drawer (opening)</label><input id="openCash" type="number" min="0" step="any" placeholder="e.g. 150000" />
+          <label>Money in POS / bank (opening)</label><input id="openBank" type="number" min="0" step="any" placeholder="e.g. 200000" />
+          <button class="btn btn-green btn-block" onclick="doSetOpening('${id}')">💾 Save opening amounts</button>`}
+      </div>
+
       <h2 style="margin-top:10px">📊 All-time money</h2>
       <div class="stat-row">
         <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD</div></div>
@@ -728,6 +774,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "close" ? "active" : ""}" onclick="renderStore('${id}','close')">🔒 Close day</div>
         <div class="tab ${tab === "day" ? "active" : ""}" onclick="renderStore('${id}','day')">📅 Day view</div>
         <div class="tab ${tab === "pos" ? "active" : ""}" onclick="renderStore('${id}','pos')">💳 POS</div>
+        <div class="tab ${tab === "handovers" ? "active" : ""}" onclick="renderStore('${id}','handovers')">🤝 Handover</div>
         <div class="tab ${tab === "notes" ? "active" : ""}" onclick="renderStore('${id}','notes')">📣 Notes</div>
         ${d.isOwner ? `<div class="tab ${tab === "customers" ? "active" : ""}" onclick="renderStore('${id}','customers')">👗 Customers</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
@@ -961,6 +1008,29 @@ async function renderStore(id, tab = "sale", msg = "") {
         </table></div>`}
       </div></div>
 
+      <div class="section ${tab === "handovers" ? "active" : ""}"><div class="card">
+        <h2>🤝 Handover — giving money to the owner</h2>
+        <p class="small">When the staff hands cash to the owner, record it here. That money leaves staff possession (dated), and new selling starts counting separately.</p>
+        <div id="hoMsg"></div>
+        <label>Amount given to owner</label>
+        <input id="hoAmount" type="number" min="1" step="any" />
+        <label>Note (optional)</label>
+        <input id="hoNote" placeholder="e.g. evening sales cash" />
+        <button class="btn btn-primary btn-block" onclick="doAddHandover('${id}')">🤝 Record handover</button>
+        <hr style="margin:14px 0">
+        ${(d.handovers || []).length === 0 ? "<p>No handovers yet.</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Date</th><th>Amount</th><th>Note</th><th>From</th><th></th></tr>
+          ${d.handovers.map((h) => `<tr>
+            <td class="small">${smartDateTime(h.date)}</td>
+            <td><b>${money(h.amount)}</b></td>
+            <td class="small">${esc(h.note || "—")}</td>
+            <td>${esc(h.worker || "—")}</td>
+            <td>${d.isOwner ? `<button class="btn btn-red" onclick="doDeleteHandover('${id}','${h.id}')">✕</button>` : ""}</td>
+          </tr>`).join("")}
+        </table></div>`}
+      </div></div>
+
       ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
         <h2>🛠 Corrections log (owner only)</h2>
         ${(d.corrections || []).length === 0 ? "<p>No corrections yet. ✅</p>" : `
@@ -1107,8 +1177,7 @@ async function doEditProduct(id, pid) {
       editingProduct = null;
       renderStore(id, "stock", "Product updated ✅ Original date kept.");
     };
-    if (file) { const r = new FileReader();
-      r.onload = () => finish(r.result); r.readAsDataURL(file); }
+    if (file) finish(await processImage(file));
     else await finish("");
   } catch (e) {
     const m = document.getElementById("editMsg");
@@ -1122,20 +1191,34 @@ async function doDeleteProduct(id, pid) {
     renderStore(id, "stock", "Product deleted"); } catch (e) { alert(e.message); }
 }
 
-function doAddProduct(id) {
-  const name = val("pName");
+async function doAddProduct(id) {
+  const name = val("pName").trim();
   const qty = Number(val("pQty"));
   const cost = Number(val("pCost"));
   const sell = Number(val("pSell"));
   const supplier = val("pSupplier");
+  const msg = document.getElementById("prodMsg");
+  if (!name) { msg.innerHTML = `<div class="msg msg-error">Type the product name.</div>`; return; }
+  if (!(qty > 0)) { msg.innerHTML = `<div class="msg msg-error">Type the quantity that arrived.</div>`; return; }
   const file = document.getElementById("pPhoto").files[0];
-  const send = (photo) => api(`/api/stores/${id}/products`, { method: "POST",
-      body: JSON.stringify({ name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo, supplier }) })
-    .then(() => renderStore(id, "stock", "Product added ✅ Purchase recorded."))
-    .catch((e) => { document.getElementById("prodMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; });
-  if (file) { const r = new FileReader();
-    r.onload = () => send(r.result); r.readAsDataURL(file); }
-  else send("");
+  const btn = document.querySelector("button[onclick^='doAddProduct']");
+  if (btn) { btn.disabled = true; btn.textContent = "Saving..."; }
+  const photo = await processImage(file);
+  try {
+    const r = await submitWrite(`/api/stores/${id}/products`, "POST",
+      { name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo, supplier });
+    ["pName", "pQty", "pCost", "pSell", "pSupplier"].forEach((x) => { const el = document.getElementById(x); if (el) el.value = ""; });
+    const ph = document.getElementById("pPhoto"); if (ph) ph.value = "";
+    msg.innerHTML = `<div class="msg msg-ok">${r.queued
+      ? `📶 Saved on this phone — will upload when network is good (${outbox.length} queued). Add the next product.`
+      : "📦 Product saved ✅ — add the next one."}</div>`;
+    updateOutboxBadge();
+    const nm = document.getElementById("pName");
+    if (nm) nm.focus();
+  } catch (e) {
+    msg.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "📦 Save product"; }
 }
 
 async function doUpdateStore(id) {
@@ -1227,6 +1310,45 @@ async function doClosing(id) {
       : `Closing saved: counted ${money(r.counted)}, expected ${money(r.expected)} — DIFFERENCE ${diff > 0 ? "+" : ""}${money(diff)} (owner notified in history)`;
     renderStore(id, "close", msg);
   } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+
+// ---------- MONEY POSITION / OPENING / HANDOVERS ----------
+async function doSetOpening(id) {
+  const cash = Number(val("openCash")), bank = Number(val("openBank"));
+  if (isNaN(cash) || isNaN(bank) || cash < 0 || bank < 0) { alert("Type both opening amounts (0 is allowed)."); return; }
+  try {
+    await api(`/api/stores/${id}/opening`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
+    renderStore(id, "sale", "💰 Opening amounts saved — money position is now live ✅");
+  } catch (e) { alert(e.message); }
+}
+async function doUpdateOpening(id, curCash, curBank) {
+  const c = prompt("Cash in drawer, opening amount:", String(curCash));
+  if (c === null) return;
+  const b = prompt("Money in POS/bank, opening amount:", String(curBank));
+  if (b === null) return;
+  const cash = Number(c), bank = Number(b);
+  if (isNaN(cash) || isNaN(bank) || cash < 0 || bank < 0) { alert("Invalid amounts."); return; }
+  try {
+    await api(`/api/stores/${id}/opening`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
+    renderStore(id, "sale", "💰 Opening updated ✅");
+  } catch (e) { alert(e.message); }
+}
+async function doAddHandover(id) {
+  try {
+    const r = await submitWrite(`/api/stores/${id}/handovers`, "POST", {
+      amount: Number(val("hoAmount")), note: val("hoNote"), worker: sellerName(id) });
+    renderStore(id, "handovers", r.queued ? `📶 No network — saved on this phone (${outbox.length} queued).` : "🤝 Handover recorded ✅ This money is no longer in staff possession.");
+  } catch (e) { document.getElementById("hoMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doDeleteHandover(id, hid) {
+  const reason = prompt("Why are you removing this handover? (recorded in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this handover record?")) return;
+  try {
+    await api(`/api/stores/${id}/handovers/${hid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "handovers", "Handover removed ✅");
+  } catch (e) { alert(e.message); }
 }
 
 // ---------- POS ----------
