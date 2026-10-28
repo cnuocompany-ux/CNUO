@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v27 =====
+// ===== MY STORES MANAGER — FRONTEND v28 =====
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -735,13 +735,14 @@ async function renderStore(id, tab = "sale", msg = "") {
           </div>
           <p class="small">Automatically = opening + all received (${money(d.cashInTotal)}) − all paid out (${money(d.cashOutTotal)})</p>
           <p class="small">🤝 Staff currently holding: <b>${money(d.staffPossession || 0)}</b>${d.lastHandover ? ` — counted since last handover: ${smartDateTime(d.lastHandover.date)}` : " — no handover yet (counting all)"}</p>
-          <p class="small">Not cash yet: 📦 stock ${money(d.totals.stockValue)} · 🧾 owed to you ${money(d.owedTotal)}</p>
-          ${d.isOwner ? `<button class="btn btn-gray" onclick="doUpdateOpening('${id}', ${d.openingCash}, ${d.openingBank})">↺ Update opening amounts</button>` : ""}`
+          <p class="small">Also: 📦 stock ${money(d.totals.stockValue)} · 🧾 owed to you ${money(d.owedTotal)}</p>
+          <p style="margin-top:6px;padding:10px;background:#e8f5e9;border-radius:8px">🌍 <b>EVERYTHING YOU OWN = ${money((d.grandTotal || 0) + (d.totals.stockValue || 0) + (d.owedTotal || 0))}</b><br><span class="small">cash + bank + all goods + every debt owed to you</span></p>
+          ${d.isOwner ? `<button class="btn btn-gray" onclick="doRecalibrate('${id}')">↺ Re-count & recalibrate</button>` : ""}`
         : `
-          <p class="small"><b>One-time setup:</b> how much was in your <b>cash drawer</b> and in your <b>POS/bank account</b> on the day you started using this app? Everything after that is calculated automatically, forever.</p>
-          <label>Cash in drawer (opening)</label><input id="openCash" type="number" min="0" step="any" placeholder="e.g. 150000" />
-          <label>Money in POS / bank (opening)</label><input id="openBank" type="number" min="0" step="any" placeholder="e.g. 200000" />
-          <button class="btn btn-green btn-block" onclick="doSetOpening('${id}')">💾 Save opening amounts</button>`}
+          <p class="small"><b>Count what you have RIGHT NOW:</b> count the cash in your drawer, and check your POS/bank app. Type both here — the system connects them to everything recorded and tracks your money automatically from now on.</p>
+          <label>💵 Cash in my hand now (drawer)</label><input id="openCash" type="number" min="0" step="any" placeholder="Count and type it" />
+          <label>🏦 Money in POS / bank now</label><input id="openBank" type="number" min="0" step="any" placeholder="Check bank app and type it" />
+          <button class="btn btn-green btn-block" onclick="doSetOpening('${id}')">💰 This is what I have now</button>`}
       </div>
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
@@ -1312,27 +1313,28 @@ async function doClosing(id) {
   } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
 }
 
-// ---------- MONEY POSITION / OPENING / HANDOVERS ----------
+// ---------- MONEY POSITION / CALIBRATE / HANDOVERS ----------
 async function doSetOpening(id) {
   const cash = Number(val("openCash")), bank = Number(val("openBank"));
   if (isNaN(cash) || isNaN(bank) || cash < 0 || bank < 0) { alert("Type both opening amounts (0 is allowed)."); return; }
   try {
-    await api(`/api/stores/${id}/opening`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
-    renderStore(id, "sale", "💰 Opening amounts saved — money position is now live ✅");
+    await api(`/api/stores/${id}/calibrate`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
+    renderStore(id, "sale", "💰 Calibrated — your money position is now live ✅");
   } catch (e) { alert(e.message); }
 }
-async function doUpdateOpening(id, curCash, curBank) {
-  const c = prompt("Cash in drawer, opening amount:", String(curCash));
+async function doRecalibrate(id) {
+  const c = prompt("Count your drawer and type CASH in hand now:", "");
   if (c === null) return;
-  const b = prompt("Money in POS/bank, opening amount:", String(curBank));
+  const b = prompt("Check your POS/bank and type that amount now:", "");
   if (b === null) return;
   const cash = Number(c), bank = Number(b);
   if (isNaN(cash) || isNaN(bank) || cash < 0 || bank < 0) { alert("Invalid amounts."); return; }
   try {
-    await api(`/api/stores/${id}/opening`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
-    renderStore(id, "sale", "💰 Opening updated ✅");
+    await api(`/api/stores/${id}/calibrate`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
+    renderStore(id, "sale", "💰 Re-counted and recalibrated ✅ Position matches reality again.");
   } catch (e) { alert(e.message); }
 }
+
 async function doAddHandover(id) {
   try {
     const r = await submitWrite(`/api/stores/${id}/handovers`, "POST", {
