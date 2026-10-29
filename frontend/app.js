@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v33 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v34 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -731,28 +731,6 @@ async function renderStore(id, tab = "sale", msg = "") {
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
 
-      <div class="card" style="border:2px solid ${(d.grandTotal !== null && d.grandTotal !== undefined) ? "#2e7d32" : "#f0ad4e"};margin-top:10px">
-        <h2>💰 Money position (automatic)</h2>
-      <p class="small" style="color:#2e7d32">🔄 Live — checks sales, stock, POS, expenses, debts & handovers</p>
-        ${(d.grandTotal !== null && d.grandTotal !== undefined) ? `
-          <div class="stat-row" style="margin:6px 0">
-            <div class="stat"><div class="num">${money(d.drawerCash)}</div><div class="lbl">💵 Cash in drawer (physically with staff)</div></div>
-            <div class="stat"><div class="num">${money(d.bankCash)}</div><div class="lbl">🏦 POS / bank (business account)</div></div>
-            <div class="stat"><div class="num" style="color:#2e7d32">${money(d.grandTotal)}</div><div class="lbl">💰 TOTAL NOW</div></div>
-          </div>
-          <p class="small">= your count + sales & money received (${money(d.cashInTotal)}) − expenses, POS cash & handovers (${money(d.cashOutTotal)}). Goods you buy are tracked in Stock only — where their money came from is your business.</p>
-          <p class="small">Also: 📦 stock ${money(d.totals.stockValue)} · 🧾 owed to you ${money(d.owedTotal)}</p>
-          <p style="margin-top:6px;padding:10px;background:#e8f5e9;border-radius:8px">🌍 <b>EVERYTHING YOU OWN = ${money((d.grandTotal || 0) + (d.totals.stockValue || 0) + (d.owedTotal || 0))}</b><br><span class="small">cash + bank + all goods + every debt owed to you</span></p>
-          ${d.isOwner ? `<button class="btn btn-gray" onclick="doRecalibrate('${id}')">↺ Re-count & recalibrate</button>` : ""}`
-        : `
-          <p class="small"><b>Count what you have RIGHT NOW:</b> count the cash in your drawer, and check your POS/bank app. Type both here — the system connects them to everything recorded and tracks your money automatically from now on.</p>
-          <label>💵 Cash in my hand now (drawer)</label><input id="openCash" type="number" min="0" step="any" placeholder="Count and type it" />
-          <label>🏦 Money in POS / bank now</label><input id="openBank" type="number" min="0" step="any" placeholder="Check bank app and type it" />
-          <button class="btn btn-green btn-block" onclick="doSetOpening('${id}')">💰 This is what I have now</button>`}
-      </div>
-
-      ${d.isOwner ? `<div id="auditBox"></div>` : ""}
-
       <h2 style="margin-top:10px">📊 All-time money</h2>
       <div class="stat-row">
         <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD</div></div>
@@ -772,7 +750,6 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="stat"><div class="num">${money(tMoney)}</div><div class="lbl">Today's money</div></div>
         <div class="stat"><div class="num">${money(tProfit)}</div><div class="lbl">Today's profit</div></div>
         <div class="stat"><div class="num">${tSales.length}</div><div class="lbl">Today's sales</div></div>
-        <div class="stat"><div class="num">${money(d.posChargesToday || 0)}</div><div class="lbl">💳 POS charges</div></div>
       </div>
 
       <div class="tabs">
@@ -782,8 +759,6 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "debts" ? "active" : ""}" onclick="renderStore('${id}','debts')">🧾 Debts</div>
         <div class="tab ${tab === "close" ? "active" : ""}" onclick="renderStore('${id}','close')">🔒 Close day</div>
         <div class="tab ${tab === "day" ? "active" : ""}" onclick="renderStore('${id}','day')">📅 Day view</div>
-        <div class="tab ${tab === "pos" ? "active" : ""}" onclick="renderStore('${id}','pos')">💳 POS</div>
-        <div class="tab ${tab === "handovers" ? "active" : ""}" onclick="renderStore('${id}','handovers')">🤝 Handover</div>
         <div class="tab ${tab === "notes" ? "active" : ""}" onclick="renderStore('${id}','notes')">📣 Notes</div>
         ${d.isOwner ? `<div class="tab ${tab === "customers" ? "active" : ""}" onclick="renderStore('${id}','customers')">👗 Customers</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
@@ -983,63 +958,6 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div id="dayResults"></div>
       </div></div>
 
-      <div class="section ${tab === "pos" ? "active" : ""}"><div class="card">
-        <h2>💳 POS transactions</h2>
-        <p class="small"><b>WITHDRAW</b> = you give the person cash. <b>TRANSFER</b> = the person gives you cash, you send to their account.</p>
-        <div id="posMsg"></div>
-        <label>Type</label>
-        <select id="posType" onchange="posPreview()">
-          <option value="WITHDRAW">WITHDRAW — give cash</option>
-          <option value="TRANSFER">TRANSFER — receive cash, send to account</option>
-        </select>
-        <label>Amount (the person's money)</label>
-        <input id="posAmount" type="number" min="1" step="any" oninput="posPreview()" />
-        <label>Charge (your fee)</label>
-        <input id="posCharge" type="number" min="0" step="any" value="0" oninput="posPreview()" />
-        <div id="posPreview" class="small" style="background:#e8f0fe;padding:10px;border-radius:8px;margin:6px 0">Type the amount to see the calculation.</div>
-        <label>Note (optional — customer name / account)</label>
-        <input id="posNote" placeholder="e.g. Mama B / GTB" />
-        <button class="btn btn-primary btn-block" onclick="doAddPos('${id}')">💳 Save transaction</button>
-        <hr style="margin:14px 0">
-        <p><b>POS charges today: ${money(d.posChargesToday || 0)}</b> · All-time charges: ${money(d.posChargesAll || 0)}</p>
-        ${(d.posToday || []).length === 0 ? "<p>No POS transactions today.</p>" : `
-        <div style="overflow-x:auto"><table>
-          <tr><th>Time</th><th>Type</th><th>Amount</th><th>Charge</th><th>Note</th><th>By</th><th></th></tr>
-          ${d.posToday.map((x) => `<tr>
-            <td class="small">${smartTime(x.date)}</td>
-            <td><b>${x.type === "WITHDRAW" ? "💸 Withdraw" : "💰 Transfer"}</b></td>
-            <td>${money(x.amount)}</td>
-            <td style="color:#2e7d32"><b>${money(x.charge)}</b></td>
-            <td class="small">${esc(x.note || "—")}</td>
-            <td>${esc(x.worker || "—")}</td>
-            <td>${d.isOwner ? `<button class="btn btn-red" onclick="doDeletePos('${id}','${x.id}')">✕</button>` : ""}</td>
-          </tr>`).join("")}
-        </table></div>`}
-      </div></div>
-
-      <div class="section ${tab === "handovers" ? "active" : ""}"><div class="card">
-        <h2>🤝 Handover — giving money to the owner</h2>
-        <p class="small">When staff hand cash to the owner, record it here — the drawer amount drops by that amount, and the date is kept as your record.</p>
-        <div id="hoMsg"></div>
-        <label>Amount given to owner</label>
-        <input id="hoAmount" type="number" min="1" step="any" />
-        <label>Note (optional)</label>
-        <input id="hoNote" placeholder="e.g. evening sales cash" />
-        <button class="btn btn-primary btn-block" onclick="doAddHandover('${id}')">🤝 Record handover</button>
-        <hr style="margin:14px 0">
-        ${(d.handovers || []).length === 0 ? "<p>No handovers yet.</p>" : `
-        <div style="overflow-x:auto"><table>
-          <tr><th>Date</th><th>Amount</th><th>Note</th><th>From</th><th></th></tr>
-          ${d.handovers.map((h) => `<tr>
-            <td class="small">${smartDateTime(h.date)}</td>
-            <td><b>${money(h.amount)}</b></td>
-            <td class="small">${esc(h.note || "—")}</td>
-            <td>${esc(h.worker || "—")}</td>
-            <td>${d.isOwner ? `<button class="btn btn-red" onclick="doDeleteHandover('${id}','${h.id}')">✕</button>` : ""}</td>
-          </tr>`).join("")}
-        </table></div>`}
-      </div></div>
-
       ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
         <h2>🛠 Corrections log (owner only)</h2>
         ${(d.corrections || []).length === 0 ? "<p>No corrections yet. ✅</p>" : `
@@ -1078,7 +996,6 @@ async function renderStore(id, tab = "sale", msg = "") {
 
   updateOutboxBadge();
   if (tab === "day") setTimeout(() => loadDay(id), 60);
-  if (tab === "pos") setTimeout(posPreview, 60);
 
   // AUTO-REFRESH: check every 20s; re-render only if data changed,
   // never while typing, never while Amara is talking, never when tab hidden
@@ -1357,75 +1274,25 @@ async function loadAudit(id) {
   </div>`;
 }
 
-// ---------- MONEY POSITION / CALIBRATE / HANDOVERS ----------
-async function doSetOpening(id) {
-  const cash = Number(val("openCash")), bank = Number(val("openBank"));
-  if (isNaN(cash) || isNaN(bank) || cash < 0 || bank < 0) { alert("Type both opening amounts (0 is allowed)."); return; }
-  try {
-    await api(`/api/stores/${id}/calibrate`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
-    renderStore(id, "sale", "💰 Calibrated — your money position is now live ✅");
-  } catch (e) { alert(e.message); }
-}
-async function doRecalibrate(id) {
-  const c = prompt("Count your drawer and type CASH in hand now:", "");
-  if (c === null) return;
-  const b = prompt("Check your POS/bank and type that amount now:", "");
-  if (b === null) return;
-  const cash = Number(c), bank = Number(b);
-  if (isNaN(cash) || isNaN(bank) || cash < 0 || bank < 0) { alert("Invalid amounts."); return; }
-  try {
-    await api(`/api/stores/${id}/calibrate`, { method: "PUT", body: JSON.stringify({ cash, bank }) });
-    renderStore(id, "sale", "💰 Re-counted and recalibrated ✅ Position matches reality again.");
-  } catch (e) { alert(e.message); }
-}
-
-async function doAddHandover(id) {
-  try {
-    const r = await submitWrite(`/api/stores/${id}/handovers`, "POST", {
-      amount: Number(val("hoAmount")), note: val("hoNote"), worker: sellerName(id) });
-    renderStore(id, "handovers", r.queued ? `📶 No network — saved on this phone (${outbox.length} queued).` : "🤝 Handover recorded ✅ This money is no longer in staff possession.");
-  } catch (e) { document.getElementById("hoMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
-}
-async function doDeleteHandover(id, hid) {
-  const reason = prompt("Why are you removing this handover? (recorded in Corrections)");
-  if (reason === null) return;
-  if (!reason.trim()) { alert("A reason is required."); return; }
-  if (!confirm("Remove this handover record?")) return;
-  try {
-    await api(`/api/stores/${id}/handovers/${hid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
-    renderStore(id, "handovers", "Handover removed ✅");
-  } catch (e) { alert(e.message); }
-}
-
-// ---------- POS ----------
-function posPreview() {
-  const box = document.getElementById("posPreview");
+// ---------- AUDIT: auto mistake detection (owner only) ----------
+async function loadAudit(id) {
+  const box = document.getElementById("auditBox");
   if (!box) return;
-  const a = Number(val("posAmount") || 0);
-  const c = Number(val("posCharge") || 0);
-  const type = val("posType");
-  if (!a) { box.textContent = "Type the amount to see the calculation."; return; }
-  box.innerHTML = type === "WITHDRAW"
-    ? `You give <b>${money(a)}</b> cash to the customer · customer pays you <b>${money(a + c)}</b> · <b style="color:#2e7d32">you earn ${money(c)}</b><br><span class="small">Drawer: -${money(a)} cash</span>`
-    : `Customer gives you <b>${money(a + c)}</b> cash · you transfer <b>${money(a)}</b> to their account · <b style="color:#2e7d32">you earn ${money(c)}</b><br><span class="small">Drawer: +${money(a + c)} cash</span>`;
-}
-async function doAddPos(id) {
-  try {
-    const r = await submitWrite(`/api/stores/${id}/pos`, "POST", {
-      type: val("posType"), amount: Number(val("posAmount")),
-      charge: Number(val("posCharge") || 0), note: val("posNote"), worker: sellerName(id) });
-    renderStore(id, "pos", r.queued ? `📶 No network — saved on this phone (${outbox.length} queued).` : `💳 POS saved — total ${money(r.total || 0)} ✅`);
-  } catch (e) { document.getElementById("posMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
-}
-async function doDeletePos(id, pid) {
-  const reason = prompt("Why are you removing this POS entry? (recorded in Corrections)");
-  if (reason === null) return;
-  if (!reason.trim()) { alert("A reason is required."); return; }
-  if (!confirm("Remove this POS entry?")) return;
-  try {
-    await api(`/api/stores/${id}/pos/${pid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
-    renderStore(id, "pos", "POS entry removed ✅");
-  } catch (e) { alert(e.message); }
+  let r;
+  try { r = await api(`/api/stores/${id}/audit`); } catch (e) { box.innerHTML = ""; return; }
+  if (!r.count) {
+    box.innerHTML = `<div class="card" style="border:2px solid #2e7d32;margin-top:10px">
+      <h2>🩺 Audit — ALL CLEAR ✅</h2>
+      <p class="small">Checked prices, duplicates, losses, closings, debts. No mistakes detected.</p></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="card" style="border:2px solid #c62828;margin-top:10px">
+    <h2>🩺 Audit — ${r.count} thing(s) to check ⚠️</h2>
+    ${r.findings.map((f) => `<div class="msg ${f.severity === "high" ? "msg-error" : ""}" style="${f.severity === "medium" ? "background:#fff3e0;color:#9c6500" : f.severity === "low" ? "background:#e3f2fd;color:#0d47a1" : ""}">
+      <b>${esc(f.type)}</b> — ${esc(f.message)}<br>
+      <span class="small">${smartDateTime(f.date)} · by ${esc(f.worker || "—")} · <a href="#" onclick="renderStore('${id}','day');return false;" style="color:inherit;text-decoration:underline">check in Day view</a></span>
+    </div>`).join("")}
+  </div>`;
 }
 
 // ---------- DAY VIEW ----------
@@ -1439,7 +1306,7 @@ async function loadDay(id) {
   try { r = await api(`/api/stores/${id}/day?d=${d}`); }
   catch (e) { box.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; return; }
   const t = r.totals;
-  const nothing = !r.sales.length && !r.debtsAdded.length && !r.debtsPaid.length && !r.expenses.length && !r.closings.length && !r.corrections.length && !(r.pos || []).length;
+  const nothing = !r.sales.length && !r.debtsAdded.length && !r.debtsPaid.length && !r.expenses.length && !r.closings.length && !r.corrections.length;
   let h = `<h3 style="margin-top:14px">${esc(smartDate(r.day + "T12:00:00"))} — summary</h3>
     <div class="stat-row">
       <div class="stat"><div class="num">${money(t.money)}</div><div class="lbl">Money in</div></div>
@@ -1471,14 +1338,6 @@ async function loadDay(id) {
     <div style="overflow-x:auto"><table>
       <tr><th>Reason</th><th>Amount</th></tr>
       ${r.expenses.map((e) => `<tr><td>${esc(e.reason)}</td><td>${money(e.amount)}</td></tr>`).join("")}
-    </table></div>`;
-  if ((r.pos || []).length) h += `<h3 style="margin-top:12px">💳 POS (${money(r.totals.posCharges)} charges · cash impact ${money(r.totals.posCash)})</h3>
-    <div style="overflow-x:auto"><table>
-      <tr><th>Time</th><th>Type</th><th>Amount</th><th>Charge</th><th>Note</th><th>By</th></tr>
-      ${r.pos.map((x) => `<tr><td class="small">${smartTime(x.date)}</td>
-        <td><b>${x.type === "WITHDRAW" ? "💸 Withdraw" : "💰 Transfer"}</b></td>
-        <td>${money(x.amount)}</td><td style="color:#2e7d32"><b>${money(x.charge)}</b></td>
-        <td class="small">${esc(x.note || "—")}</td><td>${esc(x.worker || "—")}</td></tr>`).join("")}
     </table></div>`;
   if (r.closings.length) h += `<h3 style="margin-top:12px">🔒 Closing</h3>
     <div style="overflow-x:auto"><table>
@@ -1563,7 +1422,6 @@ async function renderReport() {
           💸 Expenses today: ${money(s.expensesToday)} ·
           ${s.lowCount ? `<span style="color:#c62828">⚠️ ${s.lowCount} low/finished</span> · ` : ""}
           ${s.openNotes ? `<span style="color:#c62828">📣 ${s.openNotes} unread note(s)</span> · ` : ""}
-          💳 POS charges today: <b>${money(s.posChargesToday || 0)}</b> ·
           ${s.lastClosing ? `🔒 Last closing: counted ${money(s.lastClosing.counted)} vs ${money(s.lastClosing.expected)} → <b style="color:${s.lastClosing.difference === 0 ? "#2e7d32" : "#c62828"}">${money(s.lastClosing.difference)}</b>` : "🔒 No closing yet"}
         </p>
       </div>`).join("")}
