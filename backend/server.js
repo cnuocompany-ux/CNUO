@@ -1,5 +1,5 @@
 // ===== MY STORES MANAGER — BACKEND v20 =====
-// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE + AUDIT + AUTO-REV
+// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE + AUDIT + AUTO-REV (goods purchases excluded from money tracking)
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -191,6 +191,14 @@ app.get("/api/stores/:id", (req, res) => {
   const expenses = s.expenses || [];
   const expensesTotal = round2(expenses.reduce((a, x) => a + x.amount, 0));
   // ===== MONEY POSITION: cash drawer bucket + POS/bank bucket =====
+  let spentCash = 0, spentBank = 0;
+  for (const p of s.products || []) for (const b of (p.purchases || [])) {
+    if (b.paidFrom === "BANK") spentBank += (b.qty || 0) * (b.costPrice || 0);
+    else spentCash += (b.qty || 0) * (b.costPrice || 0);
+  }
+  spentCash = round2(spentCash); spentBank = round2(spentBank);
+  const expCash = round2((s.expenses || []).filter((e) => e.paidFrom !== "BANK").reduce((a, e) => a + e.amount, 0));
+  const expBank = round2((s.expenses || []).filter((e) => e.paidFrom === "BANK").reduce((a, e) => a + e.amount, 0));
   const posCashIn = round2((s.pos || []).filter((x) => x.type === "TRANSFER").reduce((a, x) => a + x.total, 0));
   const posCashOut = round2((s.pos || []).filter((x) => x.type === "WITHDRAW").reduce((a, x) => a + x.amount, 0));
   const posBankIn = round2((s.pos || []).filter((x) => x.type === "WITHDRAW").reduce((a, x) => a + x.total, 0));
@@ -202,7 +210,9 @@ app.get("/api/stores/:id", (req, res) => {
   const openingCash = (s.openingCash === undefined || s.openingCash === null) ? ((s.cashOpening === undefined || s.cashOpening === null) ? null : round2(s.cashOpening)) : round2(s.openingCash);
   const openingBank = (s.openingBank === undefined || s.openingBank === null) ? null : round2(s.openingBank);
   // Drawer: opening + cash sales + debt repayments + POS transfer cash in - POS withdraw cash out - expenses - goods - handovers
-  const drawerCash = openingCash === null ? null : round2(openingCash + totalIn + debtsPaidTotal + posCashIn - posCashOut - expensesTotal - spent - handoversTotal);
+  // Goods purchases are NOT subtracted: where the money came from is the owner's business.
+  // Money position tracks only real cash movements: sales, repayments, POS, expenses, handovers.
+  const drawerCash = openingCash === null ? null : round2(openingCash + totalIn + debtsPaidTotal + posCashIn - posCashOut - expensesTotal - handoversTotal);
   // Bank/POS: opening + withdraw money in - transfer money out
   const bankCash = openingBank === null ? null : round2(openingBank + posBankIn - posBankOut);
   const grandTotal = (drawerCash === null || bankCash === null) ? null : round2(drawerCash + bankCash);
@@ -219,7 +229,7 @@ app.get("/api/stores/:id", (req, res) => {
     cashOpening: openingCash, cashNow: grandTotal, openingCash, openingBank,
     drawerCash, bankCash, grandTotal, handovers, lastHandover, staffPossession,
     cashInTotal: round2(totalIn + debtsPaidTotal + posCashIn),
-    cashOutTotal: round2(expensesTotal + spent + posCashOut + handoversTotal),
+    cashOutTotal: round2(expensesTotal + posCashOut + handoversTotal),
     posCashNet: round2(posCashIn - posCashOut),
     isOwner, products, sales: s.sales.slice().reverse(),
     corrections: isOwner ? (s.corrections || []).slice().reverse() : [],
@@ -300,7 +310,7 @@ app.post("/api/stores/:id/products", ownerOnly, async (req, res) => {
   const now = new Date().toISOString();
   const p = { id: uid(), name, photo: photo || "", qtyArrived: round2(qtyArrived),
     costPrice: Number(costPrice) || 0, sellPrice: Number(sellPrice) || 0, createdAt: now,
-    purchases: [{ id: uid(), qty: round2(qtyArrived), costPrice: Number(costPrice) || 0, supplier: (supplier || "").trim(), date: now }] };
+    purchases: [{ id: uid(), qty: round2(qtyArrived), costPrice: Number(costPrice) || 0, supplier: (supplier || "").trim(), date: now, paidFrom: (req.body.paidFrom === "BANK" ? "BANK" : "CASH") }] };
   req.store.products.push(p);
   req.store.photosAt = Date.now();
   await saveDB();
@@ -334,7 +344,8 @@ app.post("/api/stores/:id/products/:pid/restock", ownerOnly, async (req, res) =>
   if (req.body.sellPrice) p.sellPrice = Number(req.body.sellPrice);
   p.purchases = p.purchases || [];
   p.purchases.push({ id: uid(), qty, costPrice: req.body.costPrice ? Number(req.body.costPrice) : p.costPrice,
-    supplier: (req.body.supplier || "").trim(), date: new Date().toISOString() });
+    supplier: (req.body.supplier || "").trim(), date: new Date().toISOString(),
+    paidFrom: (req.body.paidFrom === "BANK" ? "BANK" : "CASH") });
   await saveDB();
   res.json({ ok: true });
 });
@@ -428,7 +439,8 @@ app.post("/api/stores/:id/expenses", ownerOnly, async (req, res) => {
   const reason = String(req.body.reason || "").trim();
   if (!(amount > 0)) return res.status(400).json({ error: "Amount is required." });
   if (!reason) return res.status(400).json({ error: "Reason is required (e.g. transport, fuel, rent)." });
-  const e = { id: uid(), amount, reason, date: new Date().toISOString(), by: "OWNER" };
+  const e = { id: uid(), amount, reason, date: new Date().toISOString(), by: "OWNER",
+    paidFrom: (req.body.paidFrom === "BANK" ? "BANK" : "CASH") };
   req.store.expenses = req.store.expenses || [];
   req.store.expenses.push(e);
   await saveDB();
