@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v34 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v35 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -729,6 +729,13 @@ async function renderStore(id, tab = "sale", msg = "") {
       ${offline ? `<div class="msg msg-error">📶 OFFLINE — showing last saved data. Sales will queue on this phone.</div>` : ""}
       <span data-outbox-badge class="badge badge-low" style="display:${outbox.length ? "" : "none"}">📶 ${outbox.length} queued</span>
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
+      ${(() => {
+        const lh = d.lastHandover || null;
+        const holding = d.sales.filter((s) => !lh || s.date > lh.date).reduce((a, s) => a + s.amount, 0);
+        return `<div class="card" style="padding:10px 14px;margin:0 0 10px 0;background:${holding > 0 ? "#fff8e1" : "#e8f5e9"}">
+          💰 Staff is holding: <b>${money(holding)}</b>${lh ? ` — since handover ${smartDateTime(lh.date)}` : " (no handover yet — counting all sales)"}
+        </div>`;
+      })()}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
@@ -759,6 +766,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "debts" ? "active" : ""}" onclick="renderStore('${id}','debts')">🧾 Debts</div>
         <div class="tab ${tab === "close" ? "active" : ""}" onclick="renderStore('${id}','close')">🔒 Close day</div>
         <div class="tab ${tab === "day" ? "active" : ""}" onclick="renderStore('${id}','day')">📅 Day view</div>
+        <div class="tab ${tab === "handover" ? "active" : ""}" onclick="renderStore('${id}','handover')">🤝 Handover</div>
         <div class="tab ${tab === "notes" ? "active" : ""}" onclick="renderStore('${id}','notes')">📣 Notes</div>
         ${d.isOwner ? `<div class="tab ${tab === "customers" ? "active" : ""}" onclick="renderStore('${id}','customers')">👗 Customers</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
@@ -956,6 +964,29 @@ async function renderStore(id, tab = "sale", msg = "") {
         <label>Pick a date</label>
         <input type="date" id="dayInput" value="${new Date().toISOString().slice(0, 10)}" onchange="loadDay('${id}')" />
         <div id="dayResults"></div>
+      </div></div>
+
+      <div class="section ${tab === "handover" ? "active" : ""}"><div class="card">
+        <h2>🤝 Money given to owner</h2>
+        <p class="small">When staff hand over the money they collected, record it here. The staff count above clears to zero and starts counting new sales only. Full history is kept below.</p>
+        <div id="hoMsg"></div>
+        <label>Amount given to owner</label>
+        <input id="hoAmount" type="number" min="1" step="any" />
+        <label>Note (optional)</label>
+        <input id="hoNote" placeholder="e.g. evening sales cash" />
+        <button class="btn btn-primary btn-block" onclick="doAddHandover('${id}')">🤝 Confirm — money received</button>
+        <hr style="margin:14px 0">
+        ${(d.handovers || []).length === 0 ? "<p>No handovers yet.</p>" : `
+        <div style="overflow-x:auto"><table>
+          <tr><th>Date</th><th>Amount</th><th>Note</th><th>From</th><th></th></tr>
+          ${d.handovers.map((h) => `<tr>
+            <td class="small">${smartDateTime(h.date)}</td>
+            <td><b>${money(h.amount)}</b></td>
+            <td class="small">${esc(h.note || "—")}</td>
+            <td>${esc(h.worker || "—")}</td>
+            <td>${d.isOwner ? `<button class="btn btn-red" onclick="doDeleteHandover('${id}','${h.id}')">✕</button>` : ""}</td>
+          </tr>`).join("")}
+        </table></div>`}
       </div></div>
 
       ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
@@ -1251,6 +1282,26 @@ async function doClosing(id) {
       : `Closing saved: counted ${money(r.counted)}, expected ${money(r.expected)} — DIFFERENCE ${diff > 0 ? "+" : ""}${money(diff)} (owner notified in history)`;
     renderStore(id, "close", msg);
   } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+
+// ---------- HANDOVER (simple) ----------
+async function doAddHandover(id) {
+  const amount = Number(val("hoAmount"));
+  if (!(amount > 0)) { document.getElementById("hoMsg").innerHTML = `<div class="msg msg-error">Type the amount given to the owner.</div>`; return; }
+  try {
+    const r = await submitWrite(`/api/stores/${id}/handovers`, "POST", { amount, note: val("hoNote"), worker: sellerName(id) });
+    renderStore(id, "handover", r.queued ? `📶 No network — saved on this phone (${outbox.length} queued).` : "🤝 Recorded ✅ Staff count cleared — new sales start counting now.");
+  } catch (e) { document.getElementById("hoMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doDeleteHandover(id, hid) {
+  const reason = prompt("Why are you removing this record? (kept in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this handover record?")) return;
+  try {
+    await api(`/api/stores/${id}/handovers/${hid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "handover", "Record removed ✅");
+  } catch (e) { alert(e.message); }
 }
 
 // ---------- AUDIT: auto mistake detection (owner only) ----------
