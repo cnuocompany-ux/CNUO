@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v31 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v33 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -733,13 +733,14 @@ async function renderStore(id, tab = "sale", msg = "") {
 
       <div class="card" style="border:2px solid ${(d.grandTotal !== null && d.grandTotal !== undefined) ? "#2e7d32" : "#f0ad4e"};margin-top:10px">
         <h2>💰 Money position (automatic)</h2>
+      <p class="small" style="color:#2e7d32">🔄 Live — checks sales, stock, POS, expenses, debts & handovers</p>
         ${(d.grandTotal !== null && d.grandTotal !== undefined) ? `
           <div class="stat-row" style="margin:6px 0">
             <div class="stat"><div class="num">${money(d.drawerCash)}</div><div class="lbl">💵 Cash in drawer (physically with staff)</div></div>
             <div class="stat"><div class="num">${money(d.bankCash)}</div><div class="lbl">🏦 POS / bank (business account)</div></div>
             <div class="stat"><div class="num" style="color:#2e7d32">${money(d.grandTotal)}</div><div class="lbl">💰 TOTAL NOW</div></div>
           </div>
-          <p class="small">Automatically = opening + all received (${money(d.cashInTotal)}) − all paid out (${money(d.cashOutTotal)})</p>
+          <p class="small">= your count + sales & money received (${money(d.cashInTotal)}) − expenses, POS cash & handovers (${money(d.cashOutTotal)}). Goods you buy are tracked in Stock only — where their money came from is your business.</p>
           <p class="small">Also: 📦 stock ${money(d.totals.stockValue)} · 🧾 owed to you ${money(d.owedTotal)}</p>
           <p style="margin-top:6px;padding:10px;background:#e8f5e9;border-radius:8px">🌍 <b>EVERYTHING YOU OWN = ${money((d.grandTotal || 0) + (d.totals.stockValue || 0) + (d.owedTotal || 0))}</b><br><span class="small">cash + bank + all goods + every debt owed to you</span></p>
           ${d.isOwner ? `<button class="btn btn-gray" onclick="doRecalibrate('${id}')">↺ Re-count & recalibrate</button>` : ""}`
@@ -1232,14 +1233,12 @@ async function doAddProduct(id) {
   try {
     const r = await submitWrite(`/api/stores/${id}/products`, "POST",
       { name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo, supplier });
-    ["pName", "pQty", "pCost", "pSell", "pSupplier"].forEach((x) => { const el = document.getElementById(x); if (el) el.value = ""; });
-    const ph = document.getElementById("pPhoto"); if (ph) ph.value = "";
-    msg.innerHTML = `<div class="msg msg-ok">${r.queued
-      ? `📶 Saved on this phone — will upload when network is good (${outbox.length} queued). Add the next product.`
-      : "📦 Product saved ✅ — add the next one."}</div>`;
-    updateOutboxBadge();
-    const nm = document.getElementById("pName");
-    if (nm) nm.focus();
+    if (r.queued) {
+      msg.innerHTML = `<div class="msg msg-ok">📶 No network — saved on this phone (${outbox.length} queued). It will appear when network returns.</div>`;
+      updateOutboxBadge();
+    } else {
+      renderStore(id, "stock", "📦 Product added ✅ Stock, sell list and money updated everywhere.");
+    }
   } catch (e) {
     msg.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
   }
