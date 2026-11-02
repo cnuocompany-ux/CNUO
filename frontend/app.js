@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v35 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v36 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -677,6 +677,9 @@ async function renderStore(id, tab = "sale", msg = "") {
   const tMoney = tSales.reduce((a, s) => a + s.amount, 0);
   const tProfit = tSales.reduce((a, s) => a + (s.amount - s.qty * (s.costPrice || 0)), 0);
   const trueProfit = (d.totals.totalIn || 0) - (d.totals.spent || 0);
+  // REAL owner profit: sold - cost of what was actually sold - expenses (unsold stock not counted)
+  const costOfSold = Math.max(0, (d.totals.spent || 0) - (d.totals.stockValue || 0));
+  const realProfit = Math.round(((d.totals.totalIn || 0) - costOfSold - (d.expensesTotal || 0)) * 100) / 100;
 
   // ---- smart suggestions data ----
   const productNames = [...new Set(d.products.map((p) => p.name))];
@@ -731,14 +734,19 @@ async function renderStore(id, tab = "sale", msg = "") {
       ${sellerName(id) ? `<div class="card" style="padding:10px 14px;margin:0 0 10px 0">👤 Selling today: <b>${esc(sellerName(id))}</b></div>` : ""}
       ${(() => {
         const lh = d.lastHandover || null;
-        const holding = d.sales.filter((s) => !lh || s.date > lh.date).reduce((a, s) => a + s.amount, 0);
+        const since = lh ? lh.date : "0000";
+        const sold = d.sales.filter((s) => s.date > since).reduce((a, s) => a + s.amount, 0)
+          + (d.debtsPaid || []).filter((x) => (x.paidDate || "") > since).reduce((a, x) => a + x.amount, 0);
+        const exp = (d.expenses || []).filter((e) => e.date > since).reduce((a, e) => a + e.amount, 0);
+        const holding = Math.round((sold - exp) * 100) / 100;
         return `<div class="card" style="padding:10px 14px;margin:0 0 10px 0;background:${holding > 0 ? "#fff8e1" : "#e8f5e9"}">
-          💰 Staff is holding: <b>${money(holding)}</b>${lh ? ` — since handover ${smartDateTime(lh.date)}` : " (no handover yet — counting all sales)"}
+          💰 Staff is holding: <b>${money(holding)}</b> <span class="small">(collected ${money(sold)} − expenses ${money(exp)})${lh ? ` since ${smartDateTime(lh.date)}` : " — no handover yet"}</span>
         </div>`;
       })()}
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
+      <p class="small">✅ ALL-TIME PROFIT = goods sold − cost of those goods − expenses. Stock still in your shop is not counted until it sells.</p>
       <div class="stat-row">
         <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD</div></div>
         <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 SPENT on goods</div></div>
@@ -746,8 +754,8 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="stat"><div class="num">${money(d.owedTotal || 0)}</div><div class="lbl">🧾 OWED to you</div></div>
       </div>
       <div class="stat-row">
-        <div class="stat"><div class="num" style="color:${(d.totals.profit || 0) >= 0 ? "#2e7d32" : "#c62828"}">${money(d.totals.profit)}</div><div class="lbl">✅ NET PROFIT (after expenses)</div></div>
-        <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Money in stock</div></div>
+        <div class="stat"><div class="num" style="color:${realProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(realProfit)}</div><div class="lbl">✅ ALL-TIME PROFIT (yours)</div></div>
+        <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Goods in stock (cost)</div></div>
         <div class="stat"><div class="num">${d.totals.count}</div><div class="lbl">All-time sales</div></div>
         <div class="stat"><div class="num">${(d.debts || []).length}</div><div class="lbl">Unpaid debts</div></div>
       </div>
