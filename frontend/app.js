@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v37b =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v38 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -1045,6 +1045,13 @@ async function renderStore(id, tab = "sale", msg = "") {
     if (document.hidden || assistantActive) return;
     const ae = document.activeElement;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
+    // never interrupt a half-finished sale or an open edit form
+    const selEl = document.getElementById("saleProduct");
+    const amtEl = document.getElementById("saleAmount");
+    const qtyEl = document.getElementById("saleQty");
+    const srchEl = document.getElementById("saleSearch");
+    if ((selEl && selEl.value) || (qtyEl && qtyEl.value && Number(qtyEl.value) !== 1)
+        || (amtEl && amtEl.value) || (srchEl && srchEl.value) || editingProduct) return;
     try {
       const d2 = await api(`/api/stores/${id}`);
       if (lastRev !== null && d2.rev !== lastRev) {
