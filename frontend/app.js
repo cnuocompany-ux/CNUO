@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v37 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v37b =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -699,7 +699,7 @@ async function renderStore(id, tab = "sale", msg = "") {
       <span class="small">added: ${p.createdAt ? smartDate(p.createdAt) : "—"} · cost: ${money(p.costPrice)}</span><br>
       ${(p.purchases || []).length === 0 ? `<span class="small" style="color:#555">no purchase records</span>` : (p.purchases || []).map((b) => `
         <div class="small" style="color:#555">📥 ${smartDate(b.date)}: <b>${fmtQty(b.qty)}</b> @ ${money(b.costPrice)}${b.supplier ? " from " + esc(b.supplier) : ""}
-        ${ownerView ? ` <button class="btn btn-red" style="padding:0 7px;font-size:0.72rem" onclick="doDeletePurchase('${ownerView === true ? "" : ownerView}','${p.id}','${b.id}')">✕</button>` : ""}</div>`).join("")}</td>
+        ${ownerView ? ` <button class="btn btn-red" style="padding:0 7px;font-size:0.72rem" onclick="doDeletePurchase('${ownerView === true ? "" : ownerView}','${p.id}','${b.id}',${b.qty})">✕</button>` : ""}</div>`).join("")}</td>
     <td>${fmtQty(p.qtyArrived)}</td><td>${fmtQty(p.sold)}</td><td><b>${fmtQty(p.remaining)}</b></td>
     <td>${badge(p.status)}</td><td>${money(p.sellPrice)}</td>
     ${ownerView ? `<td><button class="btn btn-gray" onclick="startEdit('${p.id}','${id}')">✏️ Edit / +Stock</button>
@@ -1171,6 +1171,23 @@ async function doEditProduct(id, pid) {
     if (m) m.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; else alert(e.message);
   } finally {
     editSaving = false;
+  }
+}
+
+// ---------- DELETE ONE PURCHASE BATCH (type-to-confirm: accidents impossible) ----------
+async function doDeletePurchase(storeId, pid, bid, qty) {
+  const typed = prompt(`You are about to DELETE one purchase batch of ${fmtQty(qty)} pieces.\n\nTo confirm, TYPE the number ${fmtQty(qty)} below. (Typing anything else cancels - this prevents accidents)`);
+  if (typed === null) return;
+  if (typed.trim() !== String(fmtQty(qty))) { alert("Not deleted - the number you typed does not match. Nothing was removed."); return; }
+  const reason = prompt("Why remove this batch? (kept in Corrections - product and original date stay untouched)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Final step: remove ONLY this batch? Quantity, SPENT and profit will recalculate.")) return;
+  try {
+    await api(`/api/stores/${storeId}/products/${pid}/purchases/${bid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(storeId, "stock", "✅ Batch removed — everything recalculated. Original date kept.");
+  } catch (e) {
+    alert("DELETE FAILED: " + e.message + "\n\nIf it says 'not found', you must also upload the NEW server.js (server-v37) to the backend folder.");
   }
 }
 
