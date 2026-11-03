@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v38 =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v38b =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -1181,6 +1181,18 @@ async function doEditProduct(id, pid) {
   }
 }
 
+// ---------- DELETE WHOLE PRODUCT ----------
+async function doDeleteProduct(id, pid) {
+  if (!confirm("Delete this product, its purchase history and its sales? (Reason will be recorded)")) return;
+  const reason = prompt("Why delete this product? (kept in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  try {
+    await api(`/api/stores/${id}/products/${pid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "stock", "Product deleted ✅ Everything recalculated.");
+  } catch (e) { alert(e.message); }
+}
+
 // ---------- DELETE ONE PURCHASE BATCH (type-to-confirm: accidents impossible) ----------
 async function doDeletePurchase(storeId, pid, bid, qty) {
   const typed = prompt(`You are about to DELETE one purchase batch of ${fmtQty(qty)} pieces.\n\nTo confirm, TYPE the number ${fmtQty(qty)} below. (Typing anything else cancels - this prevents accidents)`);
@@ -1318,6 +1330,109 @@ async function loadDay(id) {
         <td class="small">${esc(c.details || "")}</td><td>${esc(c.reason)}</td></tr>`).join("")}
     </table></div>`;
   box.innerHTML = h;
+}
+
+// ---------- DEBTS ----------
+async function doAddDebt(id) {
+  try {
+    const r = await submitWrite(`/api/stores/${id}/debts`, "POST", {
+      customer: val("dbCustomer"), amount: Number(val("dbAmount")),
+      note: val("dbNote"), worker: sellerName(id) });
+    renderStore(id, "debts", r.queued ? `📶 No network — saved on this phone (${outbox.length} queued).` : "Debt recorded ✅ The owner can see it anytime.");
+  } catch (e) { document.getElementById("debtMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doPayDebt(id, did) {
+  if (!confirm("Confirm: the customer has PAID this debt?")) return;
+  try {
+    const r = await submitWrite(`/api/stores/${id}/debts/${did}/pay`, "PUT", { worker: sellerName(id) });
+    renderStore(id, "debts", r.queued ? "📶 Will mark as paid when network returns." : "Marked as paid ✅");
+  } catch (e) { alert(e.message); }
+}
+async function doDeleteDebt(id, did) {
+  const reason = prompt("Why are you removing this debt? (recorded in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this debt entry?")) return;
+  try {
+    await api(`/api/stores/${id}/debts/${did}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "debts", "Debt removed ✅ Reason recorded.");
+  } catch (e) { alert(e.message); }
+}
+
+// ---------- EXPENSES ----------
+async function doAddExpense(id) {
+  try {
+    await api(`/api/stores/${id}/expenses`, { method: "POST", body: JSON.stringify({
+      amount: Number(val("expAmount")), reason: val("expReason") }) });
+    renderStore(id, "expenses", "Expense saved ✅");
+  } catch (e) { document.getElementById("expMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+async function doDeleteExpense(id, eid) {
+  const reason = prompt("Why are you removing this expense? (recorded in Corrections)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("A reason is required."); return; }
+  if (!confirm("Remove this expense?")) return;
+  try {
+    await api(`/api/stores/${id}/expenses/${eid}`, { method: "DELETE", body: JSON.stringify({ reason: reason.trim() }) });
+    renderStore(id, "expenses", "Expense removed ✅");
+  } catch (e) { alert(e.message); }
+}
+
+// ---------- CLOSE DAY ----------
+async function doClosing(id) {
+  const counted = val("closeCounted");
+  if (counted === "" || isNaN(Number(counted))) { alert("Type the cash you counted."); return; }
+  try {
+    const r = await api(`/api/stores/${id}/closing`, { method: "POST", body: JSON.stringify({
+      counted: Number(counted), worker: sellerName(id) }) });
+    const diff = r.difference;
+    const msg = diff === 0
+      ? `Closing saved: counted ${money(r.counted)} = expected ✅ Perfect.`
+      : `Closing saved: counted ${money(r.counted)}, expected ${money(r.expected)} — DIFFERENCE ${diff > 0 ? "+" : ""}${money(diff)} (owner sees this in history)`;
+    renderStore(id, "close", msg);
+  } catch (e) { document.getElementById("closeMsg").innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`; }
+}
+
+// ---------- ADD PRODUCT (owner) ----------
+async function doAddProduct(id) {
+  const name = val("pName").trim();
+  const qty = Number(val("pQty"));
+  const cost = Number(val("pCost"));
+  const sell = Number(val("pSell"));
+  const supplier = val("pSupplier");
+  const msg = document.getElementById("prodMsg");
+  if (!name) { msg.innerHTML = `<div class="msg msg-error">Type the product name.</div>`; return; }
+  if (!(qty > 0)) { msg.innerHTML = `<div class="msg msg-error">Type the quantity that arrived.</div>`; return; }
+  const file = document.getElementById("pPhoto").files[0];
+  const btn = document.querySelector("button[onclick^='doAddProduct']");
+  if (btn) { btn.disabled = true; btn.textContent = "Saving..."; }
+  const photo = await processImage(file);
+  try {
+    const r = await submitWrite(`/api/stores/${id}/products`, "POST",
+      { name, qtyArrived: qty, costPrice: cost, sellPrice: sell, photo, supplier });
+    if (r.queued) {
+      msg.innerHTML = `<div class="msg msg-ok">📶 No network — saved on this phone (${outbox.length} queued). It will appear when network returns.</div>`;
+      updateOutboxBadge();
+    } else {
+      renderStore(id, "stock", "📦 Product added ✅ Stock, sell list and money updated everywhere.");
+    }
+  } catch (e) {
+    msg.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "📦 Save product"; }
+}
+
+// ---------- BACKUP ----------
+async function doBackup() {
+  try {
+    const data = await api("/api/export");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "my-stores-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    alert("Backup downloaded ✅ Keep this file safe.");
+  } catch (e) { alert(e.message); }
 }
 
 // ---------- NOTES / CUSTOMERS / OWNER REPORT ----------
