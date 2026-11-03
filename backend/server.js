@@ -1,5 +1,5 @@
 // ===== MY STORES MANAGER — BACKEND v20 =====
-// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE + AUDIT + AUTO-REV (goods purchases excluded from money tracking)
+// + DEBTS + EXPENSES + CLOSING + NOTES + CUSTOMERS + MORNING REPORT + DAY VIEW + POS + MONEY POSITION + HANDOVERS + CALIBRATE + AUDIT + AUTO-REV (goods purchases excluded from money tracking + per-batch delete + double-add guard)
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -753,6 +753,28 @@ app.get("/api/stores/:id/audit", ownerAuth, (req, res) => {
   }
   findings.sort((a, b) => b.date.localeCompare(a.date));
   res.json({ count: findings.length, findings: findings.slice(0, 50) });
+});
+
+// ---------- DELETE ONE PURCHASE BATCH (keep product + original date) ----------
+app.delete("/api/stores/:id/products/:pid/purchases/:bid", ownerAuth, async (req, res) => {
+  const s = getStore(req.params.id);
+  if (!s) return res.status(404).json({ error: "Store not found" });
+  const p = s.products.find((x) => x.id === req.params.pid);
+  if (!p) return res.status(404).json({ error: "Product not found" });
+  const b = (p.purchases || []).find((x) => x.id === req.params.bid);
+  if (!b) return res.status(404).json({ error: "Batch not found" });
+  const reason = String(req.body.reason || "").trim();
+  if (!reason) return res.status(400).json({ error: "A reason is required (for the corrections log)." });
+  const soldQty = (s.sales || []).filter((x) => x.productId === p.id).reduce((a, x) => a + Number(x.qty), 0);
+  if (round2(Number(p.qtyArrived) - b.qty) < soldQty)
+    return res.status(400).json({ error: "Cannot remove this batch - some of it was already sold. Remove the sale first (Corrections)." });
+  p.qtyArrived = round2(Number(p.qtyArrived) - b.qty);
+  p.purchases = p.purchases.filter((x) => x.id !== req.params.bid);
+  s.corrections = s.corrections || [];
+  s.corrections.push({ id: uid(), type: "PURCHASE REMOVED", date: new Date().toISOString(), by: "OWNER", reason,
+    details: p.name + ": " + b.qty + " @ " + b.costPrice + " (" + b.date + ")" });
+  await saveDB();
+  res.json({ ok: true });
 });
 
 app.get("/", (req, res) => res.send("CNUO API running - CNUO Stores Manager"));
