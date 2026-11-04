@@ -1,4 +1,4 @@
-// ===== MY STORES MANAGER — FRONTEND v38b =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
+// ===== MY STORES MANAGER — FRONTEND v39b =====\n// v31: AUTO-REFRESH every 20s when data changes (rev-based, non-intrusive)
 // v25: instant product adding (phone-side photo shrink + queue + clear form)
 // v21: OFFLINE OUTBOX — save sales/debts on phone when no network, auto-send when back
 // v19: comma-numbers fix (10,000) + voice assistant AMARA + picker + halves + corrections
@@ -748,16 +748,16 @@ async function renderStore(id, tab = "sale", msg = "") {
       ${d.totals.alerts > 0 ? `<div class="msg msg-error">⚠️ ${d.totals.alerts} product(s) finished or low on stock!</div>` : ""}
 
       <h2 style="margin-top:10px">📊 All-time money</h2>
-      <p class="small">✅ ALL-TIME PROFIT = goods sold − cost of those goods − expenses. Stock still in your shop is not counted until it sells.</p>
+      ${d.isOwner ? `<p class="small">✅ ALL-TIME PROFIT = goods sold − cost of those goods − expenses. Stock still in your shop is not counted until it sells.</p>` : ""}
       <div class="stat-row">
         <div class="stat"><div class="num">${money(d.totals.totalIn)}</div><div class="lbl">💰 All-time SOLD</div></div>
-        <div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 SPENT on goods</div></div>
-        <div class="stat"><div class="num">${money(d.expensesTotal || 0)}</div><div class="lbl">💸 EXPENSES</div></div>
+        ${d.isOwner ? `<div class="stat"><div class="num">${money(d.totals.spent)}</div><div class="lbl">🛒 SPENT on goods</div></div>` : ""}
+        ${d.isOwner ? `<div class="stat"><div class="num">${money(d.expensesTotal || 0)}</div><div class="lbl">💸 EXPENSES</div></div>` : ""}
         <div class="stat"><div class="num">${money(d.owedTotal || 0)}</div><div class="lbl">🧾 OWED to you</div></div>
       </div>
       <div class="stat-row">
-        <div class="stat"><div class="num" style="color:${realProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(realProfit)}</div><div class="lbl">✅ ALL-TIME PROFIT (yours)</div></div>
-        <div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Goods in stock (cost)</div></div>
+        ${d.isOwner ? `<div class="stat"><div class="num" style="color:${realProfit >= 0 ? "#2e7d32" : "#c62828"}">${money(realProfit)}</div><div class="lbl">✅ ALL-TIME PROFIT (yours)</div></div>` : ""}
+        ${d.isOwner ? `<div class="stat"><div class="num">${money(d.totals.stockValue)}</div><div class="lbl">📦 Goods in stock (cost)</div></div>` : ""}
         <div class="stat"><div class="num">${d.totals.count}</div><div class="lbl">All-time sales</div></div>
         <div class="stat"><div class="num">${(d.debts || []).length}</div><div class="lbl">Unpaid debts</div></div>
       </div>
@@ -780,6 +780,7 @@ async function renderStore(id, tab = "sale", msg = "") {
         <div class="tab ${tab === "notes" ? "active" : ""}" onclick="renderStore('${id}','notes')">📣 Notes</div>
         ${d.isOwner ? `<div class="tab ${tab === "customers" ? "active" : ""}" onclick="renderStore('${id}','customers')">👗 Customers</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "expenses" ? "active" : ""}" onclick="renderStore('${id}','expenses')">💸 Expenses</div>` : ""}
+        ${d.isOwner ? `<div class="tab ${tab === "profit" ? "active" : ""}" onclick="renderStore('${id}','profit')">📈 Profit</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "fixes" ? "active" : ""}" onclick="renderStore('${id}','fixes')">🛠 Corrections</div>` : ""}
         ${d.isOwner ? `<div class="tab ${tab === "settings" ? "active" : ""}" onclick="renderStore('${id}','settings')">⚙️ Settings</div>` : ""}
       </div>
@@ -838,11 +839,11 @@ async function renderStore(id, tab = "sale", msg = "") {
         <h2>Sales log</h2>
         ${d.sales.length === 0 ? "<p>No sales yet.</p>" : `
         <div style="overflow-x:auto"><table>
-          <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th><th>Profit</th><th>By</th>${d.isOwner ? "<th></th>" : ""}</tr>
+          <tr><th>Date & time</th><th>Product</th><th>Qty</th><th>Amount</th>${d.isOwner ? "<th>Profit</th>" : ""}<th>By</th>${d.isOwner ? "<th></th>" : ""}</tr>
           ${d.sales.map((s) => `<tr>
             <td class="small">${smartDateTime(s.date)}</td><td>${esc(s.productName)}</td>
             <td>${fmtQty(s.qty)}</td><td>${money(s.amount)}</td>
-            <td style="color:#2e7d32"><b>${money(s.amount - s.qty * (s.costPrice || 0))}</b></td>
+            ${d.isOwner ? `<td style="color:#2e7d32"><b>${money(s.amount - s.qty * (s.costPrice || 0))}</b></td>` : ""}
             <td>${esc(s.worker || "—")}</td>
             ${d.isOwner ? `<td><button class="btn btn-red" onclick="doDeleteSale('${id}','${s.id}')">✕</button></td>` : ""}
           </tr>`).join("")}
@@ -998,6 +999,48 @@ async function renderStore(id, tab = "sale", msg = "") {
           </tr>`).join("")}
         </table></div>`}
       </div></div>
+
+      ${d.isOwner ? `<div class="section ${tab === "profit" ? "active" : ""}"><div class="card">
+        <h2>📈 Profit tracker (owner only)</h2>
+        ${(() => {
+          const pOf = (s) => (s.profit !== undefined ? s.profit : (s.amount - s.qty * (s.costPrice || 0)));
+          const now = new Date();
+          const wkStart = new Date(now); wkStart.setDate(wkStart.getDate() - ((wkStart.getDay() + 6) % 7)); wkStart.setHours(0, 0, 0, 0);
+          const moKey = now.toISOString().slice(0, 7);
+          const yrKey = String(now.getFullYear());
+          const cur = { w: { money: 0, profit: 0 }, m: { money: 0, profit: 0 }, y: { money: 0, profit: 0 } };
+          const weeks = {}, months = {}, years = {};
+          for (const s of d.sales) {
+            const p = pOf(s), dt = new Date(s.date), m = s.amount;
+            if (dt >= wkStart) { cur.w.money += m; cur.w.profit += p; }
+            if (s.date.slice(0, 7) === moKey) { cur.m.money += m; cur.m.profit += p; }
+            if (s.date.slice(0, 4) === yrKey) { cur.y.money += m; cur.y.profit += p; }
+            const ws = new Date(dt); ws.setDate(ws.getDate() - ((ws.getDay() + 6) % 7)); ws.setHours(0,0,0,0);
+            const wk = "Week of " + ws.toLocaleDateString();
+            weeks[wk] = weeks[wk] || { money: 0, profit: 0 }; weeks[wk].money += m; weeks[wk].profit += p;
+            const mk = s.date.slice(0, 7);
+            months[mk] = months[mk] || { money: 0, profit: 0 }; months[mk].money += m; months[mk].profit += p;
+            const yk = s.date.slice(0, 4);
+            years[yk] = years[yk] || { money: 0, profit: 0 }; years[yk].money += m; years[yk].profit += p;
+          }
+          const r2 = (x) => Math.round(x * 100) / 100;
+          const rows = (obj, label) => Object.keys(obj).sort().reverse().map((k) =>
+            `<tr><td class="small">${esc(k)}</td><td>${money(r2(obj[k].money))}</td><td style="color:${obj[k].profit >= 0 ? "#2e7d32" : "#c62828"}"><b>${money(r2(obj[k].profit))}</b></td></tr>`).join("");
+          return `
+          <div class="stat-row">
+            <div class="stat"><div class="num">${money(r2(cur.w.money))}</div><div class="lbl">💰 Sold this week</div></div>
+            <div class="stat"><div class="num" style="color:${cur.w.profit >= 0 ? "#2e7d32" : "#c62828"}">${money(r2(cur.w.profit))}</div><div class="lbl">📈 Profit this week</div></div>
+            <div class="stat"><div class="num" style="color:${cur.m.profit >= 0 ? "#2e7d32" : "#c62828"}">${money(r2(cur.m.profit))}</div><div class="lbl">📈 Profit this month</div></div>
+            <div class="stat"><div class="num" style="color:${cur.y.profit >= 0 ? "#2e7d32" : "#c62828"}">${money(r2(cur.y.profit))}</div><div class="lbl">📈 Profit this year</div></div>
+          </div>
+          <h3 style="margin-top:12px">By week</h3>
+          <div style="overflow-x:auto"><table><tr><th>Week</th><th>Sold</th><th>Profit</th></tr>${rows(weeks) || "<tr><td colspan=3>No sales yet</td></tr>"}</table></div>
+          <h3 style="margin-top:12px">By month</h3>
+          <div style="overflow-x:auto"><table><tr><th>Month</th><th>Sold</th><th>Profit</th></tr>${rows(months) || "<tr><td colspan=3>No sales yet</td></tr>"}</table></div>
+          <h3 style="margin-top:12px">By year</h3>
+          <div style="overflow-x:auto"><table><tr><th>Year</th><th>Sold</th><th>Profit</th></tr>${rows(years) || "<tr><td colspan=3>No sales yet</td></tr>"}</table></div>`;
+        })()}
+      </div></div>` : ""}
 
       ${d.isOwner ? `<div class="section ${tab === "fixes" ? "active" : ""}"><div class="card">
         <h2>🛠 Corrections log (owner only)</h2>
